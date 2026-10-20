@@ -1,0 +1,23 @@
+{
+  "title": "International Performance Measurement & Verification Protocol, December 1997",
+  "source_filename": "impvp_december_1997.pdf",
+  "sha256": "5ef97c4a16fde69c5f7127dc1177a8031e6b11304d561f1abaebe3df35fc5f4d",
+  "printed_pages": [
+    59,
+    60,
+    61,
+    62,
+    71,
+    72
+  ],
+  "pdf_pages": [
+    60,
+    61,
+    62,
+    63,
+    72,
+    73
+  ],
+  "implemented": "OLS steady-state linear and heating/cooling change-point regression plus calendar/exogenous covariates, reporting-condition adjustment and separately calibrated post regression",
+  "excluded": "Not an implementation of every protocol model or automatic standards certification"
+}

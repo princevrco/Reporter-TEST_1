@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promenade-option-c"
+version = "0.3.3"
+description = "Meter-level baseline regression, energy forecasting and M&V review"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = ["numpy==1.26.4", "pandas==2.2.2", "tzdata>=2024.1"]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.4"]
+excel = ["openpyxl==3.1.5"]
+runpod = ["runpod>=1.7,<2"]
+
+[project.scripts]
+option-c = "option_c.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

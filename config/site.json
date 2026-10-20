@@ -1,0 +1,79 @@
+{
+  "schema": "option_c.config.v1",
+  "site_id": "promenade",
+  "meter_id": "PWST104274",
+  "boundary_description": "Utility meter PWST104274; physical whole-facility boundary not yet verified",
+  "timezone": "America/Toronto",
+  "resolution": "daily",
+  "interval_minutes": 15,
+  "intervention_timestamp": "2026-08-28T00:00:00-04:00",
+  "calendar_features": true,
+  "post_calendar_features": false,
+  "independent_variables": [],
+  "allow_meter_only_baseline": false,
+  "minimum_baseline_periods": 90,
+  "minimum_post_calibration_periods": 60,
+  "change_points_c": [
+    12,
+    15,
+    18.3,
+    21,
+    24
+  ],
+  "validation_limits": {
+    "cvrmse_pct": 20.0,
+    "abs_nmbe_pct": 5.0
+  },
+  "synthetic": false,
+  "review": {
+    "meter_boundary_verified": false,
+    "timestamps_verified": false,
+    "intervention_confirmed": false,
+    "independent_variables_verified": false,
+    "static_factors_reviewed": false,
+    "mv_plan_approved": false,
+    "bms_semantics_verified": false
+  },
+  "optimizer": {
+    "mode_map": {"-1": "cooling", "0": "off", "1": "heating"},
+    "bin_minutes": 15,
+    "maximum_lead_minutes": 60,
+    "bms_max_age_minutes": 5,
+    "minimum_daily_coverage": 0.9,
+    "minimum_training_days": 60,
+    "minimum_off_days": 5,
+    "calendar_features": true,
+    "columns": {},
+    "zones": {}
+  },
+  "bms_features": {
+    "bms_fan": {
+      "column": "RTU_5J_SupplyFan",
+      "allowed_values": [
+        0,
+        1
+      ],
+      "minimum_samples_per_bin": 1,
+      "minimum_hour_coverage": 0.9
+    },
+    "bms_cool1": {
+      "column": "RTU_5J_Cool1",
+      "allowed_values": [
+        0,
+        1
+      ],
+      "minimum_samples_per_bin": 1,
+      "minimum_hour_coverage": 0.9
+    },
+    "bms_cool2": {
+      "column": "RTU_5J_Cool2",
+      "allowed_values": [
+        0,
+        1
+      ],
+      "minimum_samples_per_bin": 1,
+      "minimum_hour_coverage": 0.9
+    }
+  },
+  "notes": "Provisional intervention date and pilot BMS signal meanings. The three RTU_5J proxies do not automatically represent all mall assets. Configure representative signals and verify boundaries; examples are not commissioned site facts."
+}
