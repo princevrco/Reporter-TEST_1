@@ -36,8 +36,8 @@ def main():
     p.add_argument('--meter',type=Path,default=Path('local/consumption_kwh.zip'))
     p.add_argument('--bms',type=Path,default=Path('local/live_bms_history.csv'))
     p.add_argument('--config',type=Path,default=Path('config/promenade-test.json'))
-    p.add_argument('--start',default='2026-10-02')
-    p.add_argument('--end',default='2026-10-16',help='Exclusive local date')
+    p.add_argument('--start',default='2026-08-15')
+    p.add_argument('--end',default='2026-10-21',help='Exclusive local date')
     p.add_argument('--output',type=Path,default=Path('results/promenade-test'))
     p.add_argument('--rate',type=float,default=.12,help='Assumed CAD per kWh')
     p.add_argument('--forecast-start');p.add_argument('--forecast-end',help='Exclusive local date')
@@ -47,7 +47,7 @@ def main():
         if not file.exists():p.error('Missing input: '+str(file))
     if args.output.exists():p.error('Output already exists; choose a new --output directory')
     cfg=load(args.config)
-    print('TEST ONLY: provisional control start; calendar-only unadjusted comparison.',flush=True)
+    print('Engineering comparison: confirmed August 15 control start; calendar-only baseline.',flush=True)
     print('All source meters analyzed separately. Zone effects unavailable. Flat-rate CAD comparison will be generated.',flush=True)
     with tempfile.TemporaryDirectory(prefix='promenade-meter-') as temp:
         meter=args.meter

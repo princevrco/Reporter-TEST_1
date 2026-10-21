@@ -65,6 +65,26 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
                 daily_forecasts.extend({'meter_id':meter,**period} for period in f['periods'])
                 if views and views[-1]['meter_id']==meter:views[-1]['forecast_periods']=f['periods']
             except (DataError,ValueError,KeyError) as exc:row.update(forecast_kwh=None,forecast_status=str(exc))
+        response_path=base/'response/model.json'
+        if response_path.exists():
+            response=load(response_path)
+            row['bms_response_validation']=response['holdout_metrics']
+            row['bms_response_gates']=response['gates']
+            view=next((v for v in views if v['meter_id']==meter),None)
+            if view is None:
+                view={'meter_id':meter,'reporting_periods':[],'gates':response['gates']};views.append(view)
+            view['gates']=sorted(set(view['gates']+['BMS response: '+g for g in response['gates']]))
+            view['response_periods']=[{'timestamp':stamp(p['date'],timezone,True).isoformat(),'bms_estimated_kwh':p['bms_estimated_kwh']}
+                for p in response['heldout_predictions'] if summary['start']<=p['date']<summary['end_exclusive']]
+            future_path=base/'response/optimized-future.json'
+            if future_path.exists():
+                future=load(future_path)
+                if any(p['outside_training_support'] for p in future):view['gates'].append('Optimized scenario exceeds BMS training support')
+                view['optimized_periods']=[{'timestamp':stamp(p['date'],timezone,True).isoformat(),'optimized_kwh':p['bms_estimated_kwh']} for p in future if start<=p['date']<end]
+                eligible={p['date']:p for p in future if start<=p['date']<end}
+                expected=pd.date_range(a.tz_convert(timezone),b.tz_convert(timezone),freq='D',inclusive='left').date.astype(str)
+                if all(d in eligible and eligible[d]['bms_estimated_kwh'] is not None and not eligible[d]['outside_training_support'] for d in expected):
+                    row['future_optimized_kwh']=sum(eligible[d]['bms_estimated_kwh'] for d in expected)
         rows.append(row)
     selected=total_meters or [];totals=total(results,selected,rate)
     fm={f['meter_id']:f['baseline_kwh'] for f in forecasts}
@@ -72,7 +92,7 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
     candidates=[r for r in rows if r['is_virtual_meter']]
     report={'rate_cad_per_kwh':rate,'currency':'CAD','start':summary['start'],'end_exclusive':summary['end_exclusive'],
             'forecast_start':start,'forecast_end_exclusive':end,'site_total':totals,'meters':rows,'unverified_boundary_candidates':candidates,
-            'scope':'Provisional calendar-only baseline comparison. CAD is kWh difference times the user-assumed flat rate; excludes demand, taxes and fixed charges. Future forecasts describe no-intervention baseline energy, not optimized consumption or future realized savings.'}
+            'scope':'Calendar-only baseline comparison requiring site review. CAD is kWh difference times the user-assumed flat rate; excludes demand, taxes and fixed charges. Baseline forecasts describe no-intervention energy. Any optimized line is conditional on a supplied operating scenario; it is not future realized savings.'}
     save(folder/'overview.json',report);pd.DataFrame(rows).to_csv(folder/'meter-summary.csv',index=False)
     save(folder/'site-total.json',totals)
     pd.DataFrame(daily_forecasts).to_csv(folder/'forecast-daily.csv',index=False)
@@ -86,5 +106,7 @@ el('scope').textContent=S.scope;for(const v of D.views){const o=document.createE
 el('candidates').textContent='Existing virtual totals (unverified candidates; never added together): '+S.unverified_boundary_candidates.map(m=>m.meter_id+': comparison '+fmt(m.savings_kwh)+' kWh / CAD $'+fmt(m.savings_cad)+'; future baseline '+fmt(m.forecast_kwh)+' kWh').join(' | ');
 function draw(){const v=D.views.find(x=>x.meter_id===el('meter').value);if(!v)return;const m=S.meters.find(x=>x.meter_id===v.meter_id);el('dates').textContent='Comparison: '+S.start+' to '+S.end_exclusive+' exclusive. Forecast: '+S.forecast_start+' to '+S.forecast_end_exclusive+' exclusive.';el('numbers').textContent='Complete-period difference: '+fmt(m.savings_kwh)+' kWh | CAD $'+fmt(m.savings_cad)+' | Future baseline: '+fmt(m.forecast_kwh)+' kWh';el('quality').textContent=m.validation+' | '+v.gates.join('; ');
 const past=v.reporting_periods||[],future=v.forecast_periods||[];const series=[[past,'baseline_kwh','#087d80'],[past,'reporting_kwh','#3265ad'],[future,'baseline_kwh','#d57b16']];const times=[...past,...future].map(r=>Date.parse(r.timestamp));if(!times.length)return;const lo=Math.min(...times),hi=Math.max(...times);const values=series.flatMap(([rs,k])=>rs.map(r=>r[k]).filter(x=>x!=null));const max=Math.max(1,...values)*1.1;const svg=el('chart');svg.innerHTML='';const make=(tag,attrs,text)=>{const n=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const[k,x]of Object.entries(attrs))n.setAttribute(k,x);if(text!=null)n.textContent=text;svg.append(n);return n};for(let i=0;i<5;i++){const y=280-i*60;make('line',{x1:75,x2:970,y1:y,y2:y,stroke:'#ccd5dc'});make('text',{x:5,y:y+5,'font-size':12},fmt(max*i/4))}make('text',{x:75,y:20,'font-size':13},'Daily kWh');for(const[rs,k,color]of series){let points=[];const flush=()=>{if(points.length)make('polyline',{points:points.join(' '),fill:'none',stroke:color,'stroke-width':2});points=[]};for(const r of rs){if(r[k]==null){flush();continue}const x=75+(Date.parse(r.timestamp)-lo)/Math.max(1,hi-lo)*895,y=280-r[k]/max*240;points.push(x+','+y);const dot=make('circle',{cx:x,cy:y,r:3,fill:color});const title=document.createElementNS('http://www.w3.org/2000/svg','title');title.textContent=r.timestamp+' '+fmt(r[k])+' kWh';dot.append(title)}flush()}make('text',{x:75,y:315,'font-size':12},new Date(lo).toISOString().slice(0,10));make('text',{x:970,y:315,'font-size':12,'text-anchor':'end'},new Date(hi).toISOString().slice(0,10))}el('meter').addEventListener('change',draw);draw();</script>'''
+    html=html.replace('Orange: future baseline forecast.','Orange: future baseline forecast. Purple: held-out BMS consumption estimate. Red: user-supplied optimized operating scenario. Fitted-history diagnostics are excluded from this chart.')
+    html=html.replace("[future,'baseline_kwh','#d57b16']];const times=[...past,...future]", "[future,'baseline_kwh','#d57b16'],[v.response_periods||[],'bms_estimated_kwh','#8451a1'],[v.optimized_periods||[],'optimized_kwh','#b43f42']];const times=[...past,...future,...(v.response_periods||[]),...(v.optimized_periods||[])]")
     (folder/'index.html').write_text(html,encoding='utf-8')
     return report

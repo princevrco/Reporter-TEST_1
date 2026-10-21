@@ -6,7 +6,7 @@
   "timezone": "America/Toronto",
   "resolution": "daily",
   "interval_minutes": 15,
-  "intervention_timestamp": "2026-08-28T00:00:00-04:00",
+  "intervention_timestamp": "2026-08-15T00:00:00-04:00",
   "calendar_features": true,
   "post_calendar_features": false,
   "independent_variables": [],
@@ -28,14 +28,18 @@
   "review": {
     "meter_boundary_verified": false,
     "timestamps_verified": false,
-    "intervention_confirmed": false,
+    "intervention_confirmed": true,
     "independent_variables_verified": false,
     "static_factors_reviewed": false,
     "mv_plan_approved": false,
     "bms_semantics_verified": false
   },
   "optimizer": {
-    "mode_map": {"-1": "cooling", "0": "off", "1": "heating"},
+    "mode_map": {
+      "-1": "cooling",
+      "0": "off",
+      "1": "heating"
+    },
     "bin_minutes": 15,
     "maximum_lead_minutes": 60,
     "bms_max_age_minutes": 5,
@@ -75,5 +79,6 @@
       "minimum_hour_coverage": 0.9
     }
   },
-  "notes": "Provisional intervention date and pilot BMS signal meanings. The three RTU_5J proxies do not automatically represent all mall assets. Configure representative signals and verify boundaries; examples are not commissioned site facts."
+  "notes": "User confirmed on October 21, 2026: all assets under optimized control from August 15. Baseline remains conservatively before July 24 to exclude uncertain commissioning. Meter boundary, timezone convention, BMS semantics and non-control changes remain unverified.",
+  "baseline_end_exclusive": "2026-07-24T00:00:00-04:00"
 }

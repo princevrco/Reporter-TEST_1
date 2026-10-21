@@ -17,7 +17,7 @@ def bms_context(path,timezone):
     if 'timestamp' not in f or f.empty:raise DataError('Live BMS CSV needs timestamp and data rows')
     if any(pd.isna(t) or pd.Timestamp(t).tzinfo is None for t in f.timestamp):
         raise DataError('Live BMS timestamps require explicit offsets')
-    f['timestamp']=pd.to_datetime(f.timestamp,utc=True)
+    f['timestamp']=pd.to_datetime(f.timestamp,utc=True,format='mixed')
     unique=f.drop_duplicates('timestamp').copy()
     unique['date']=unique.timestamp.dt.tz_convert(timezone).dt.date.astype(str)
     context={day:{'bms_samples':len(g),'bms_hours_with_samples':int(g.timestamp.dt.floor('h').nunique())}
@@ -43,7 +43,9 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
         raise DataError('Daily boundaries must be local midnight')
     context,audit=bms_context(bms_path,cfg['timezone'])
     carma=prepare(meter_path,kind=kind,carma_daily_kwh=carma_daily_kwh) if kind=='carma' else None
-    meters=sorted(carma.meter_id.unique()) if carma is not None else discover(meter_path,kind)
+    normalized=pd.read_csv(meter_path,dtype={'meter_id':str}) if kind=='normalized' else None
+    if normalized is not None and not {'date','meter_id','energy_kwh'}<=set(normalized):raise DataError('Normalized meter data needs date, meter_id, energy_kwh')
+    meters=sorted(carma.meter_id.unique()) if carma is not None else sorted(normalized.meter_id.unique()) if normalized is not None else discover(meter_path,kind)
     if not meters:raise DataError('No meters found in source')
     out=Path(output);out.mkdir(parents=True,exist_ok=True)
     save(out/'bms-audit.json',audit)
@@ -83,8 +85,9 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
         folder.mkdir(exist_ok=True)
         entry={'meter_id':meter,'folder':folder.name}
         try:
-            part=carma[carma.meter_id==meter].copy() if carma is not None else prepare(meter_path,meter,kind=kind)
-            if kind=='carma':
+            part=carma[carma.meter_id==meter].copy() if carma is not None else normalized[normalized.meter_id==meter].copy() if normalized is not None else prepare(meter_path,meter,kind=kind)
+            if part.duplicated(['date','meter_id']).any():raise DataError('Duplicate selected meter dates')
+            if 'meter_description' in part and 'is_virtual_meter' in part:
                 entry.update(meter_description=part.meter_description.iloc[0],is_virtual_meter=bool(part.is_virtual_meter.iloc[0]))
             c=deepcopy(cfg);c['meter_id']=meter;c['allow_meter_only_baseline']=True
             c['boundary_description']=f'Raw source meter {meter}; physical boundary requires verification'

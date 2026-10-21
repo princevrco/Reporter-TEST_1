@@ -1,7 +1,7 @@
 # Promenade energy analysis
 
 Daily meter baseline regression, energy forecasting and measurement-and-verification
-review tools. Version **0.3.3**. Python **3.11 or 3.12**. Runs on CPU.
+review tools. Version **0.4.0**. Python **3.11 or 3.12**. Runs on CPU.
 
 The project analyzes all supplied meters independently. It compares measured energy
 with a frozen historical baseline, forecasts baseline consumption for a selectable
@@ -81,9 +81,9 @@ inspect staged files before committing. Custom folders and renamed files still n
 
 ## Promenade configuration
 
-Use `config/promenade-test.json` for the supplied snapshots. Its assumptions are provisional:
+Use `config/promenade-test.json` for the supplied snapshots. Its full-control start has been confirmed; the other site assumptions remain under review:
 
-- Full-control start: **October 2, 2026**, based on an approximate user report; exact start unconfirmed.
+- Full-control start: **August 15, 2026**, confirmed by the user for all assets on October 21.
 - Baseline end, exclusive: **July 24, 2026**, excluding uncertain early commissioning/control history.
 - Daily timezone: `America/Toronto`; CARMA's daily convention still needs confirmation.
 - Review flags remain false until the corresponding facts have been verified.
@@ -96,21 +96,128 @@ or loosen validation limits merely to obtain a positive savings result.
 `config/site.json` is an example for the advanced CLI, including illustrative BMS
 point mappings. It is not a commissioned all-asset configuration.
 
+## Combine the earlier exports with a new download
+
+Use this workflow for the **August 15–October 20, 2026 inclusive** analysis. Place the
+earlier exports and new exports under `local/`, preserving the original files.
+Supply them in oldest-to-newest order. If the new history already includes all older
+data, you can still supply both; identical overlapping records are collapsed, never summed.
+
+```bash
+python scripts/analyze_promenade.py \
+  --meter local/consumption_kwh.zip local/consumption_kwh-new.zip \
+  --bms local/live_bms_history.csv local/live_bms_history-new.csv \
+  --start 2026-08-15 --end 2026-10-21 \
+  --forecast-start 2026-10-21 --forecast-end 2027-01-21 \
+  --rate 0.12 --output results/aug15-oct20
+```
+
+New meter inputs may be raw daily Consumption CSV, exporter ZIP or extracted directory.
+Every directory/ZIP chunk still requires its exporter quality companion and valid checksum.
+The BMS inputs must be wide history/update CSVs with offset-aware timestamps.
+
+Conflicting meter revisions or BMS cells stop the default run. Review the reported
+conflict. If the last supplied export is the authoritative revision, rerun into a new
+output directory with `--overlap-policy prefer-last`. Every revision is recorded in
+`merge-audit.json`; later non-null BMS cells override older ones at the same timestamp.
+Missing timestamps are not interpolated. Revised invalid meter data remains invalid;
+it is not silently replaced with an older valid number.
+
+The new download must contain **complete meter readings through October 20**. The
+earlier snapshot ends October 15 and alone cannot produce complete-window savings.
+Incomplete periods remain unavailable while paired-period comparisons remain visible.
+The confirmed control date is August 15. The baseline still conservatively excludes
+July 24 onward because of uncertain earlier commissioning. Other review flags remain.
+
+### BMS electrical response
+
+The new workflow also learns a **separate Ridge regression** from synchronized meter
+energy and BMS features. No manual calibration file or external weather file is required.
+It does not change the frozen historical baseline or replace missing meter readings.
+
+Features include equipment-specific and aggregate stage/fan/valve proxies, temperatures,
+active setpoints, positive heating/cooling temperature deviations, setpoint changes,
+and previous-day values. Time alignment is past-only with a bounded signal age.
+An invalid status interrupts propagation; gaps remain unknown. Daily features require
+90% bin coverage by default. These are sampled operation proxies, not measured runtime.
+
+The generated `response-config.json` proposes equipment bindings from column names.
+Inspect them and verify encodings, units, shared equipment and relevance. A proposed
+mapping is marked `semantics_verified: false` and all resulting fits retain that gate.
+Discrete roles accept only 0/1; values such as 0.5, 3 or 10 are not automatically
+interpreted as discrete stages. Valve roles use 0–100, temperature/setpoint roles -20–60 C.
+Adjust source preparation/mappings to the actual point definitions rather than guessing.
+
+For a preparation-only pass, add `--prepare-only` to the command with a separate output
+directory. Review its proposed mappings, then provide them on the full run:
+
+```bash
+# Use alongside the --meter / --bms arguments above:
+# --response-config results/preparation/response-config.json
+```
+
+The regression selects well-covered, varying features using only an initial training
+prefix, caps their number (default 24 BMS features), adds weekday schedule terms, and tunes the Ridge penalty with expanding
+chronological folds. Each fold learns its own scaling. The final 20% is held out for
+evaluation; the saved final model then refits all eligible data before the reporting
+end. The defaults require at least 40 training days and 8 later holdout days after
+feature/energy quality exclusions. Insufficient coverage produces an explicit unavailable
+status. A selected feature subset does not establish every asset's separate effect.
+
+Additional outputs:
+
+| File | Purpose |
+| --- | --- |
+| `merge-audit.json` | Input hashes, identical overlaps and explicit revisions |
+| `response-config.json` | Applied or proposed BMS bindings and response settings |
+| `response/daily-features.csv` | Coverage-screened daily features and one-day lags |
+| `response/feature-audit.json` | Rejected values, signal coverage and feature definitions |
+| `response-summary.csv` | Each meter's BMS fit, penalty, held-out errors and blockers |
+| `meter-.../response/heldout.csv` | Independent chronological consumption estimates |
+| `meter-.../response/fit-diagnostics.csv` | In-sample diagnostics; never independent savings evidence |
+| `meter-.../response/model.json` | Checksum-protected final electrical response model |
+
+The dashboard overlays eligible held-out BMS consumption estimates in purple. The
+training-period diagnostic fit is deliberately excluded from that plot. Meter minus
+BMS-estimated consumption is **prediction error**, not savings. Reported kWh/CAD
+differences continue to use historical baseline minus measured consumption.
+
+### Future optimized consumption
+
+The three-month calendar baseline forecast remains available. A BMS response model
+also needs a **future operating trajectory** to predict optimized consumption: expected
+temperatures, states, setpoints and other mapped signals on the same timeline. Today's
+live readings alone do not specify the next three months. No last-value future is invented.
+
+Provide that wide timestamped scenario with `--future-bms local/optimized-scenario.csv`.
+It must include prior-day context for lags. The model predicts only dates after its
+training end; missing and negative predictions remain unavailable, and operating-range
+extrapolation is flagged. The dashboard shows the conditional optimized trajectory in red.
+It is not a validated free-running forecast merely because the electrical mapping passes.
+
+For a separate projected control-policy comparison, also provide
+`--baseline-future-bms local/old-policy-scenario.csv`. Both trajectories must represent
+comparable external conditions and consistent thermal/equipment dynamics. Replacing only
+setpoints while retaining the optimized temperatures/runtime is not a valid old-policy
+trajectory. The script does not generate or certify these scenarios.
+Per-meter `response/scenario-comparison.csv` records conditional kWh/CAD differences
+only when both predictions exist and remain inside fitted feature ranges. Site/BMS
+review gates still apply; these differences are not realized or verified causal savings.
+
 ## Run the daily comparison and forecast
 
 From the repository root with the environment active:
 
 ```bash
 python scripts/test_promenade.py \
-  --start 2026-10-02 --end 2026-10-16 \
-  --forecast-start 2026-10-20 --forecast-end 2027-01-20 \
+  --start 2026-08-15 --end 2026-10-21 \
+  --forecast-start 2026-10-21 --forecast-end 2027-01-21 \
   --rate 0.12 --output results/promenade-test
 ```
 
-Dates are site-local. **End dates are exclusive.** This example compares October 2–15
-and forecasts October 20–January 19. Without forecast flags, the forecast starts on the
-current site-local date and lasts three calendar months. Reporting defaults match the
-original October snapshot; choose reporting dates appropriate to each new export.
+Dates are site-local. **End dates are exclusive.** This example compares August 15–October 20
+and forecasts October 21–January 20. Without forecast flags, the forecast starts on the
+current site-local date and lasts three calendar months. Reporting defaults cover August 15–October 20; choose reporting dates appropriate to each new export.
 
 The runner validates inputs, fits every meter separately, prints progress, and writes
 the dashboard. Use a new output directory for each full run; existing directories are
@@ -125,7 +232,7 @@ To change forecast dates or the energy rate without repeating import/training:
 ```bash
 python scripts/summarize_promenade.py \
   --results results/promenade-test \
-  --forecast-start 2026-10-20 --forecast-end 2027-01-20 \
+  --forecast-start 2026-10-21 --forecast-end 2027-01-21 \
   --rate 0.12
 ```
 
@@ -203,7 +310,7 @@ and reviewed equipment mappings. Associations are not causal zone savings. It do
 replace measured reporting consumption with an optimizer prediction.
 
 The supplied legacy archive ending September 14 lacks the explicit timing contract
-required by the importer and predates the October full-control period. It is not a
+required by the importer. It overlaps part of the confirmed control period but is not a
 supported direct input. Its flattened trajectories must not be converted by guessing
 zone order, forecast start, issue time or cadence.
 
@@ -227,7 +334,13 @@ has not been verified by this release; provision storage/permissions and test it
 
 ## Verification and known limits
 
-Release 0.3.3 passed 59 offline tests locally and built successfully as a Python wheel.
+The previous 0.3.3 release passed 59 offline tests and built as a Python wheel.
+Version 0.4.0 adds overlap reconciliation and a separately validated BMS Ridge response model.
+It passed 67 offline tests, including an end-to-end combined-export test for all 67
+requested reporting days, and built successfully as a Python wheel. The existing BMS
+snapshot alone does not provide enough eligible days for this response model; fresh
+history must pass the same coverage and validation checks. No new real-data savings
+result is claimed before that download is provided.
 The configured GitHub Actions matrix has not yet run in your repository.
 
 The previous real-data check discovered 247 meters: 209 produced comparison reports,
