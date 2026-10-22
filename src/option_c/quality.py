@@ -30,6 +30,16 @@ def assess(part,cfg,start,end,reviews=None):
     for i in f.index[scope&f.energy_kwh.gt(threshold)]:
         add('extreme_daily_spike',[i],'baseline' if f.loc[i,'date']<cutoff else 'reporting',
             f'Baseline median={median:.6g} kWh; engineering screen threshold={threshold:.6g} kWh. Not proof of invalid data.')
+    # A single zero in a virtual total can be a calculation/telemetry failure.
+    # Flag it without declaring an error or fabricating replacement consumption.
+    virtual=(f['is_virtual_meter'].astype(str).str.lower().eq('true').any()
+             if 'is_virtual_meter' in f else False)
+    if virtual and reference>0:
+        for i in f.index[scope&f.energy_kwh.eq(0)]:
+            neighbours=f[(pd.to_datetime(f.date)-pd.Timestamp(f.loc[i,'date'])).abs()==pd.Timedelta(days=1)]
+            if len(neighbours)==2 and neighbours.energy_kwh.gt(0).all():
+                add('isolated_virtual_zero',[i],'baseline' if f.loc[i,'date']<cutoff else 'reporting',
+                    'Zero virtual consumption between positive adjacent days; verify virtual formula, telemetry and source registers. No replacement inferred.')
     zeros=f.energy_kwh.eq(0)&scope
     # Missing calendar dates break a run. Optimization may explain reporting zeros; review rather than reject them.
     segments=[];current=[]

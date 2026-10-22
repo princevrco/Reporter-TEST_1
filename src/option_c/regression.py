@@ -180,9 +180,17 @@ def uncertainty_samples(model,x,hours,repeats=256):
     if len(coefs)<30 or len(res)<8:return None
     rng=np.random.default_rng(199713);block=model.get('uncertainty_residual_block_size',7);starts_available=model.get('uncertainty_residual_block_starts',[]);samples=[]
     if not starts_available:return None
+    centered=model.get('uncertainty_centering')=='centered_bootstrap_and_holdout_residuals'
+    coefficient_center=np.mean(coefs,axis=0) if centered else None
+    if centered:
+        # Bias is a separate validation failure, not extra claimed avoided energy.
+        # Center over admissible blocks, including their edge sampling frequency.
+        block_values=np.concatenate([res[s:s+block] for s in starts_available])
+        res=res-float(block_values.mean())
     for _ in range(repeats):
         starts=rng.choice(starts_available,size=(len(x)+block-1)//block)
         noise=np.concatenate([res[s:s+block] for s in starts])[:len(x)]
         c=np.array(coefs[rng.integers(len(coefs))])
+        if centered:c=c-coefficient_center+np.array(model['coef_average_kw'])
         samples.append(float(np.sum((x@c)*hours+noise)))
     return np.array(samples)

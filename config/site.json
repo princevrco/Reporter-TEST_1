@@ -98,7 +98,12 @@
     "fold_days": 28,
     "bootstrap_repeats": 64,
     "sensitivity_limit_pct": 10,
-    "annual_calendar_candidates": true
+    "annual_calendar_candidates": true,
+    "annual_harmonics": [
+      1,
+      2,
+      3
+    ]
   },
   "data_quality": {
     "enabled": true,
@@ -107,5 +112,18 @@
     "zero_run_days": 7,
     "shift_window_days": 28,
     "shift_ratio": 1.75
+  },
+  "setpoint_response": {
+    "enabled": true,
+    "maximum_age_minutes": 30,
+    "minimum_training_days": 28,
+    "holdout_calendar_days": 14,
+    "minimum_holdout_days": 8,
+    "ridge_alphas": [
+      0.1,
+      1,
+      10,
+      100
+    ]
   }
 }

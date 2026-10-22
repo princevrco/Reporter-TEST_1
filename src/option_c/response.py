@@ -64,12 +64,12 @@ def features(frame,cfg,timezone):
             block=pd.concat(cols,axis=1)
             # Sum/average only when all configured contributors are known, never silently treat a missing asset as OFF.
             signals_frame[role]=block.mean(axis=1).where(block.notna().all(axis=1))
-    for role in ('cooling_demand','heating_demand','setpoint_change'):
+    for role in ('cooling_demand','heating_demand','setpoint_change','heat_setpoint_change'):
         cols=[]
         for group,mapping in groups.items():
-            sp=signals.get((group,'heat_setpoint' if role=='heating_demand' else 'cool_setpoint'));temp=signals.get((group,'temperature'))
+            sp=signals.get((group,'heat_setpoint' if role in ('heating_demand','heat_setpoint_change') else 'cool_setpoint'));temp=signals.get((group,'temperature'))
             if sp is not None:
-                if role=='setpoint_change':
+                if role in ('setpoint_change','heat_setpoint_change'):
                     value=sp.diff().abs().where(sp.notna()&sp.shift().notna());cols.append(value);signals_frame[group+'::'+role]=value
                 elif temp is not None:
                     value=(sp-temp).clip(lower=0) if role=='heating_demand' else (temp-sp).clip(lower=0)

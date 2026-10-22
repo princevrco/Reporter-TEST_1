@@ -1,7 +1,7 @@
 # Promenade energy analysis
 
 Daily meter baseline regression, energy forecasting and measurement-and-verification
-review tools. Version **0.5.0**. Python **3.11 or 3.12**. Runs on CPU.
+review tools. Version **0.6.2**. Python **3.11 or 3.12**. Runs on CPU.
 
 The project analyzes all supplied meters independently. It compares measured energy
 with a frozen historical baseline, forecasts baseline consumption for a selectable
@@ -9,6 +9,74 @@ period, and converts energy differences to CAD at a configurable flat rate.
 It runs locally or in a Runpod Pod. It does not connect to CARMA or write BACnet commands.
 
 ## Analysis scope
+
+### Investigating virtual-meter anomalies
+
+Promenade's proposed total = EMPs 1–11 + EMPs 12–23 identity is configured in
+`config/promenade-test.json` under `meter_reconciliation`. Analysis exports
+`meter-reconciliation.csv` and JSON. These check arithmetic consistency, not the
+physical electrical boundary. Missing children never become zero or a replacement
+total. Virtual zeros between positive adjacent days now require quality review,
+including isolated zeros that a sustained-zero-run screen would miss.
+
+To investigate an existing run without changing its inputs:
+
+```bash
+python scripts/investigate_meter_anomalies.py \
+  --meter results/aug15-oct20/merged-meter.csv \
+  --output results/anomaly-investigation --rate 0.12
+```
+
+The investigation exports event-day evidence, proposed-identity reconciliation,
+an unverified panel-name sum comparison, a provider request draft, and baseline
+exclusion sensitivity. The latter compares unchanged source data against
+diagnostic exclusion of flagged baseline spikes and isolated virtual zeros;
+reporting consumption and dates stay fixed. It does not issue review approvals,
+change source data, supply missing kWh, or release savings. A panel-name sum is
+not a verified virtual-meter formula. Send the provider draft yourself if needed;
+the application sends no messages. Apply documented source corrections only
+through the existing quality-review ledger workflow.
+
+### Output interpretation
+
+All fitted numerical differences are now displayed regardless of model review
+status. `difference_kwh` and `difference_cad` are baseline minus measured energy
+on identical eligible dates. Review status does not erase that arithmetic; it
+indicates whether the baseline can be trusted. Existing `savings_*` fields retain
+their release rules for compatibility. No failed model is relabelled as verified.
+`estimated_savings_kwh` and `estimated_savings_cad` always expose the same
+calculated difference when available, with `difference_status` alongside them.
+
+`consumption-comparison-summary.csv` and `consumption-comparison-daily.csv`
+separate five calculations: baseline minus meter; baseline minus optimizer
+reconstruction; meter minus optimizer reconstruction; and the corresponding two
+comparisons using independent held-out optimizer predictions. Every comparison
+exports matched days and both consumption totals. Complete-period fields require
+every day. Missing BMS days stay missing. Fitted reconstruction and independent
+validation are never mixed. Meter minus optimizer is prediction error, not avoided
+energy: both describe the same controlled operation. Baseline minus optimizer is
+a model-to-model avoided-energy estimate, subject to both models' limitations.
+
+`calculated_forecast_kwh` and CAD expose every available baseline regression
+forecast, including flagged models, alongside `forecast_status`. These are
+no-intervention forecasts; an optimized forecast needs an explicit future BMS
+trajectory (`--future-bms`). Setpoint changes do not by themselves specify future
+zone temperatures or electrical consumption. Zero/unused meters with no fitted
+model and missing optimizer observations retain an explicit unavailable result;
+the application never fabricates coefficients or replaces missing input with zero.
+
+A second forecast, `continued_control_forecast_kwh` and CAD, fits weekday OLS to
+the observed controlled-period meter readings. It requires at least 42 days,
+28 training days, four examples of each weekday, and a separate last-14-calendar-day
+holdout. Earlier rolling folds select the lookback (all, 35 or 42 days) and whether
+to include a linear trend, where enough observations exist. Selection never uses
+the outer holdout targets. A final refit uses the selected lookback after validation.
+The forecast assumes recent control policy and load patterns continue; it is not
+a simulation of future setpoint changes, weather or seasonal loads. Its numerical
+prediction remains visible alongside error metrics and review flags. Daily values
+are exported in `continued-control-forecast-daily.csv`, and each fitted artifact
+is saved as `continued-control-forecast.json`. No historical reporting day is
+replaced by a forecast, and the future meter targets never enter fitting.
 
 | Output | Interpretation |
 | --- | --- |
@@ -115,7 +183,7 @@ The supplied configurations enable the v0.5 daily baseline workflow:
 
 - Fit ordinary least squares, Huber robust regression and weekday median baselines
   over all available historical data, the latest 365 days and the latest 180 days.
-- Also test a simple annual sine/cosine calendar pattern for OLS/Huber when each
+- Also test annual sine/cosine calendar patterns with one, two or three harmonics for OLS/Huber when each
   fitting window contains at least a year with 90% coverage. It requires no weather
   file; it represents recurring calendar seasonality, not actual weather adjustment.
 - Select the estimator/lookback using up to three rolling historical validation folds
@@ -187,6 +255,70 @@ This implementation follows the robust-loss and chronological-validation princip
 in the [Huber regression documentation](https://scikit-learn.org/stable/modules/linear_model.html#huber-regression)
 and [time-series validation documentation](https://scikit-learn.org/stable/modules/cross_validation.html#time-series-split).
 The implementation uses NumPy; scikit-learn is not required.
+
+## Consumption estimated from setpoint changes (v0.6)
+
+The all-meter analysis also fits a separate, small **setpoint-response electricity
+model**. It learns kWh relationships from the existing meter readings; no equipment
+rating assumptions, new hardware or separate calibration experiment are required.
+Inputs include cooling/heating setpoint levels, setpoint changes, zone temperature
+and positive temperature-to-setpoint demand proxies. No setpoint-to-kWh conversion
+factor is assumed. A calendar-only comparator tests whether setpoints add predictive
+value on the same held-out dates.
+
+A fixed equipment cohort is selected from **past BMS availability only**, before the
+last 14 calendar days used for testing. Every contributor must be observed; cohort
+membership never silently changes between days. The default bounded signal age is
+30 minutes, accommodating occasional 20-minute sampling gaps without bridging long
+outages. The daily coverage requirement remains 90%. Confirm point meanings, units
+and permitted state age before using the estimates operationally.
+
+This small model is distinct from the legacy multi-feature Ridge response. It requires
+at least 28 covered outer-training days, at least four training observations per fitted
+coefficient in every inner fold, and at least eight later held-out days. The legacy
+40-day training floor is unchanged. Scaling and penalty selection use earlier data;
+held-out targets cannot select or train the frozen test predictor. These are engineering
+validation rules, not prescribed minimums from IPMVP. Historical backtests are development
+evidence and do not replace future independent validation.
+
+| Output | Meaning |
+| --- | --- |
+| `setpoint-response-summary.csv` | Per-meter coverage, test errors, selected family and incremental value |
+| `response/setpoint-feature-definition.json` | Fixed cooling/heating cohorts, excluded assets, mapping and sampling assumptions |
+| `meter-.../setpoint-response/heldout.csv` | Consumption estimates on unseen later days, with support flags |
+| `meter-.../setpoint-response/reporting-daily.csv` | Fitted reconstruction and independent estimates kept in separate columns |
+| `meter-.../setpoint-response/baseline-comparison.csv` | Baseline versus BMS estimates on the same held-out days; diagnostic model-to-model comparison |
+| `financial-summary.json` | Measured energy costs, estimated comparisons, withheld results and BMS coverage at the chosen rate |
+
+**A partial reconstruction is not full-period consumption.** Missing BMS days are not
+filled from meter energy, assumed OFF, or inferred from later readings. Full-period
+BMS consumption remains unavailable if required input days are missing. Fitted-history
+reconstruction is not independent evidence; only the later test estimates appear in
+the BMS chart. No statistical association is presented as a proven zone electrical share.
+
+To evaluate explicit reference setpoints, optionally add
+`--reference-setpoints local/reference-setpoints.json` with values such as:
+
+```json
+{
+  "RTU_03A": {"cooling": 24.0, "heating": 20.0},
+  "FCU_03": {"cooling": 24.0}
+}
+```
+
+Only fitted equipment groups and mapped roles are accepted. Reference values must
+come from a documented policy; the package does not guess pre-deployment settings.
+This scenario holds observed zone temperatures fixed. It is a conditional sensitivity
+calculation, not a simulation of changed thermal evolution or verified causal savings.
+Out-of-support scenarios remain diagnostic. Complete future BMS trajectories remain
+required for optimized future consumption.
+
+The v0.6 baseline also tests additional annual harmonics, and centers coefficient and
+residual bootstrap draws around the point estimate. Historical validation bias remains
+an explicit failure; it is not added to the savings estimate as extra avoided energy.
+Uncertainty bands exclude physical-boundary and causal uncertainty. Exact causal savings
+cannot be observed from these two files: the no-control energy is a counterfactual
+estimate. CAD values are flat-rate energy amounts, not complete utility-bill savings.
 
 ## Combine the earlier exports with a new download
 
@@ -426,13 +558,17 @@ has not been verified by this release; provision storage/permissions and test it
 
 ## Verification and known limits
 
-Version 0.5.0 adds robust calendar baselines, common chronological validation,
+Version 0.6.0 adds explicit setpoint-response consumption, richer annual calendar
+candidates and centered uncertainty resampling to the robust baseline workflow.
+Version 0.5.0 added common chronological validation,
 reviewable meter-quality screening and withheld headlines for unreliable results.
-All 78 offline tests passed locally. Tests include raw-value preservation, anchored review decisions, model selection
+All 85 offline tests passed locally, including the earlier 78 checks and explicit
+setpoint-response tests. Tests cover raw-value preservation, anchored decisions and selection
 without holdout leakage, missing-day handling and end-to-end exports. A local Python
 wheel is built for release. Docker and live Runpod infrastructure require site testing.
-The existing BMS snapshot still needs sufficient synchronized, coverage-screened days;
-the package does not lower validation requirements to force a response estimate.
+The legacy BMS response still needs sufficient synchronized, coverage-screened days.
+The separate small setpoint model has its own parameter-count and holdout checks;
+missing inputs and unverified point/boundary semantics remain explicit limitations.
 
 Annual calendar terms approximate recurring seasonal patterns but do not model actual
 weather or changes in heating/cooling demand; a three-month

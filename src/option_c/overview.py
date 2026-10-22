@@ -2,11 +2,14 @@
 from pathlib import Path
 from html import escape
 import json
+from decimal import Decimal, ROUND_HALF_UP
 import numpy as np
 import pandas as pd
 from .data import DataError,load,save,stamp
 from .workflow import forecast
 from .reporting import write
+from .comparisons import compare
+from .control_forecast import fit_predict as continued_forecast
 
 
 def total(results,selected,rate):
@@ -40,12 +43,13 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
     end=forecast_end or str((pd.Timestamp(start)+pd.DateOffset(months=3)).date())
     a,b=stamp(start,timezone,True),stamp(end,timezone,True)
     if b<=a or (b-a).total_seconds()>366*86400:raise DataError('Choose a positive forecast period of at most one year')
-    forecasts=[];daily_forecasts=[]
+    forecasts=[];daily_forecasts=[];comparison_daily=[];controlled_daily=[]
     for entry in summary['meters']:
         meter=entry['meter_id'];base=folder/entry['folder'];row={'meter_id':meter,'status':entry['status'],
             'is_virtual_meter':entry.get('is_virtual_meter',False),'meter_description':entry.get('meter_description',''),
             'future_optimized_kwh':None,'future_savings_kwh':None,'future_savings_cad':None}
         row.update({k:v for k,v in entry.items() if k.startswith('meter_consumption_')})
+        row['baseline_holdout_metrics']=entry.get('holdout_metrics')
         row['meter_consumption_coverage']=str(entry.get('meter_consumption_observed_days','?'))+'/'+str(entry.get('meter_consumption_expected_days','?'))
         result_path=base/'savings/result.json'
         if result_path.exists():
@@ -61,6 +65,8 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
                 diagnostic_difference_kwh=r.get('diagnostic_savings_kwh_paired'),
                 diagnostic_difference_cad=r['diagnostic_savings_kwh_paired']*rate if r.get('diagnostic_savings_kwh_paired') is not None else None,
                 selected_baseline=entry.get('selected_baseline'))
+            row['diagnostic_model_band_95_difference_kwh']=r.get('diagnostic_aggregate_model_band_95_savings_kwh',r.get('aggregate_model_band_95_savings_kwh'))
+            row['model_band_scope']=r.get('band_scope')
             if r.get('release_status')=='withheld_requires_review':row['validation']='Withheld: '+row['release_reasons']
             views.append({'meter_id':meter,'reporting_periods':r['periods'],'gates':r.get('gates',[])})
         else:row.update(reason=entry.get('reason'),savings_kwh=None,savings_cad=None)
@@ -98,6 +104,73 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
                     if any(g in response['gates'] for g in ('heldout_model_error_requires_review','meter_quality_review_required','bms_signal_semantics_unverified')):
                         row['diagnostic_future_optimized_kwh']=value
                     else:row['future_optimized_kwh']=value
+        spath=base/'setpoint-response/consumption-summary.json'
+        if spath.exists():
+            sp=load(spath)
+            row.update(setpoint_response_status=sp['status'],setpoint_model_family=sp['family'],
+                setpoint_holdout_cvrmse_pct=sp['heldout_metrics']['cvrmse_pct'],
+                setpoint_holdout_nmbe_pct=sp['heldout_metrics']['nmbe_pct'],
+                setpoint_rmse_improvement_pct=sp['setpoint_rmse_improvement_pct'],
+                setpoint_reconstruction_days=sp['reporting_reconstruction_days'],
+                diagnostic_setpoint_reconstruction_kwh=sp['diagnostic_reconstructed_kwh_available_days'],
+                setpoint_consumption_kwh_complete_period=sp['full_period_setpoint_consumption_kwh'],
+                setpoint_heldout_days=sp['independent_reporting_days'],setpoint_heldout_kwh=sp['heldout_setpoint_kwh'],
+                setpoint_response_gates=sp['gates'])
+            view=next((v for v in views if v['meter_id']==meter),None)
+            if view is None:
+                view={'meter_id':meter,'reporting_periods':[],'gates':[]};views.append(view)
+            held=pd.read_csv(base/'setpoint-response/heldout.csv')
+            view['setpoint_periods']=[{'timestamp':stamp(p['date'],timezone,True).isoformat(),
+                'setpoint_estimated_kwh':p['setpoint_estimated_kwh'] if pd.notna(p['setpoint_estimated_kwh']) else None}
+                for p in held.to_dict('records') if summary['start']<=p['date']<summary['end_exclusive']]
+            view['gates']+=['Setpoint response: '+g for g in sp['gates']]
+            scenario_path=base/'setpoint-response/optimized-future.json'
+            if scenario_path.exists():
+                scenario=load(scenario_path)
+                if any(p['outside_training_support'] for p in scenario):view['gates'].append('Setpoint future scenario exceeds training support; plotted values are diagnostic')
+                predictions={p['date']:p for p in scenario}
+                expected=pd.date_range(a.tz_convert(timezone),b.tz_convert(timezone),freq='D',inclusive='left').date.astype(str)
+                good=all(d in predictions and predictions[d]['conditional_setpoint_kwh'] is not None
+                    and not predictions[d]['outside_training_support'] for d in expected)
+                if good:
+                    value=sum(predictions[d]['conditional_setpoint_kwh'] for d in expected)
+                    row['diagnostic_setpoint_future_optimized_kwh']=value
+                    blocked={'bms_signal_semantics_unverified','heldout_model_error_requires_review',
+                             'meter_quality_review_required','setpoint_incremental_value_not_demonstrated',
+                             'heldout_bms_outside_training_support','unphysical_response_prediction'}
+                    if not blocked.intersection(sp['gates']):row['future_optimized_kwh']=value
+                view['optimized_periods']=[{'timestamp':stamp(p['date'],timezone,True).isoformat(),
+                    'optimized_kwh':p['conditional_setpoint_kwh']} for p in scenario if start<=p['date']<end]
+        periods=results.get(meter,{}).get('periods',[])
+        sp_daily=base/'setpoint-response/reporting-daily.csv'
+        sp_rows=pd.read_csv(sp_daily).to_dict('records') if sp_daily.exists() else []
+        if not periods and sp_rows:
+            periods=[{'timestamp':stamp(p['date'],timezone,True).isoformat(),
+                      'reporting_kwh':p.get('measured_kwh'),'baseline_kwh':None} for p in sp_rows]
+        comparisons,days=compare(periods,sp_rows,summary['start'],summary['end_exclusive'],timezone,rate)
+        row.update(comparisons)
+        row['difference_kwh']=comparisons['baseline_meter_difference_kwh']
+        row['difference_cad']=comparisons['baseline_meter_difference_cad']
+        row['estimated_savings_kwh']=row['difference_kwh']
+        row['estimated_savings_cad']=row['difference_cad']
+        row['difference_status']=row.get('release_status','no_fitted_baseline')
+        row['calculated_forecast_kwh']=row.get('forecast_kwh') if row.get('forecast_kwh') is not None else row.get('diagnostic_forecast_kwh')
+        row['calculated_forecast_cad']=row['calculated_forecast_kwh']*rate if row['calculated_forecast_kwh'] is not None else None
+        try:
+            controlled,cdays=continued_forecast(periods,timezone,start,end)
+            row.update(continued_control_forecast_kwh=controlled['forecast_kwh'],
+                continued_control_forecast_cad=controlled['forecast_kwh']*rate if controlled['forecast_kwh'] is not None else None,
+                continued_control_forecast_status=controlled['status'],
+                continued_control_forecast_holdout=controlled['holdout_metrics'],
+                continued_control_forecast_gates=controlled['gates'])
+            save(base/'continued-control-forecast.json',controlled)
+            controlled_daily.extend({'meter_id':meter,**p} for p in cdays)
+            view=next((v for v in views if v['meter_id']==meter),None)
+            if view is not None:view['continued_control_periods']=[{'timestamp':stamp(p['date'],timezone,True).isoformat(),
+                'continued_control_kwh':p['continued_control_kwh']} for p in cdays]
+        except DataError as exc:row.update(continued_control_forecast_kwh=None,continued_control_forecast_cad=None,
+            continued_control_forecast_status=str(exc))
+        comparison_daily.extend({'meter_id':meter,**p} for p in days)
         rows.append(row)
     selected=total_meters or [];totals=total(results,selected,rate)
     fm={f['meter_id']:f['baseline_kwh'] for f in forecasts}
@@ -106,12 +179,38 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
     report={'rate_cad_per_kwh':rate,'currency':'CAD','start':summary['start'],'end_exclusive':summary['end_exclusive'],
             'forecast_start':start,'forecast_end_exclusive':end,'site_total':totals,'meters':rows,'unverified_boundary_candidates':candidates,
             'scope':'Calendar-only baseline comparison requiring site review. CAD is kWh difference times the user-assumed flat rate; excludes demand, taxes and fixed charges. Baseline forecasts describe no-intervention energy. Any optimized line is conditional on a supplied operating scenario; it is not future realized savings.'}
-    save(folder/'overview.json',report);pd.DataFrame(rows).to_csv(folder/'meter-summary.csv',index=False)
     save(folder/'site-total.json',totals)
+    def money(value):
+        return float((Decimal(str(value))*Decimal(str(rate))).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)) if value is not None else None
+    financial=[]
+    for row in rows:
+        row['measured_energy_cost_cad_complete_period']=money(row.get('meter_consumption_kwh_complete_period'))
+        row['diagnostic_setpoint_reconstruction_cost_cad']=money(row.get('diagnostic_setpoint_reconstruction_kwh'))
+        row['setpoint_heldout_energy_cost_cad']=money(row.get('setpoint_heldout_kwh'))
+        band=row.get('diagnostic_model_band_95_difference_kwh')
+        row['diagnostic_model_band_95_difference_cad']=[money(x) for x in band] if band is not None else None
+        financial.append({k:row.get(k) for k in tuple(k for k in row if k.startswith(('baseline_meter_','baseline_optimizer_','meter_optimizer_','calculated_forecast_','continued_control_forecast_','estimated_savings_'))) + ('difference_kwh','difference_cad','comparison_interpretation','comparison_expected_days','meter_id','is_virtual_meter','meter_consumption_kwh_complete_period',
+            'measured_energy_cost_cad_complete_period','baseline_kwh','savings_kwh','savings_cad',
+            'diagnostic_difference_kwh','diagnostic_difference_cad','release_status','release_reasons',
+            'diagnostic_model_band_95_difference_kwh','diagnostic_model_band_95_difference_cad','model_band_scope',
+            'baseline_holdout_metrics','setpoint_holdout_cvrmse_pct','setpoint_holdout_nmbe_pct','setpoint_rmse_improvement_pct',
+            'setpoint_response_status','setpoint_reconstruction_days','diagnostic_setpoint_reconstruction_kwh',
+            'diagnostic_setpoint_reconstruction_cost_cad','setpoint_consumption_kwh_complete_period',
+            'setpoint_heldout_days','setpoint_heldout_kwh','setpoint_heldout_energy_cost_cad')})
+    save(folder/'financial-summary.json',{'rate_cad_per_kwh':rate,'currency':'CAD','start':summary['start'],
+        'end_exclusive':summary['end_exclusive'],'site_total':totals,'exact_savings_cad':None,
+        'exact_savings_note':'Savings require an estimated counterfactual; exact causal savings are not observable from these two input files.',
+        'scope':'Flat-rate variable energy amounts only, excluding demand charges, tax and fixed charges. Diagnostic differences are not released savings. Do not add overlapping meters.',
+        'meters':financial})
+    # Include measured energy amounts added above in the main table export as well.
+    save(folder/'overview.json',report);pd.DataFrame(rows).to_csv(folder/'meter-summary.csv',index=False)
     pd.DataFrame(daily_forecasts).to_csv(folder/'forecast-daily.csv',index=False)
+    pd.DataFrame(comparison_daily).to_csv(folder/'consumption-comparison-daily.csv',index=False)
+    pd.DataFrame(controlled_daily).to_csv(folder/'continued-control-forecast-daily.csv',index=False)
+    pd.DataFrame([{k:v for k,v in r.items() if k.startswith(('baseline_meter_','baseline_optimizer_','meter_optimizer_','calculated_forecast_','continued_control_forecast_','estimated_savings_')) or k in ('meter_id','difference_kwh','difference_cad','difference_status','release_reasons','forecast_status','reason','comparison_interpretation','comparison_expected_days')} for r in rows]).to_csv(folder/'consumption-comparison-summary.csv',index=False)
     pd.DataFrame(candidates).to_csv(folder/'boundary-candidates.csv',index=False)
     data=json.dumps({'summary':report,'views':views},allow_nan=False).replace('<','\\u003c')
-    table=''.join('<tr>'+''.join('<td>'+escape('Unavailable' if row.get(k) is None else f'{row[k]:,.2f}' if isinstance(row[k],float) else str(row[k]))+'</td>' for k in ('meter_id','meter_consumption_kwh_available','meter_consumption_coverage','baseline_kwh','measured_kwh','savings_kwh','savings_cad','forecast_kwh','validation','reason'))+'</tr>' for row in rows)
+    table=''.join('<tr>'+''.join('<td>'+escape('Unavailable' if row.get(k) is None else f'{row[k]:,.2f}' if isinstance(row[k],float) else str(row[k]))+'</td>' for k in ('meter_id','meter_consumption_kwh_available','meter_consumption_coverage','baseline_kwh','measured_kwh','difference_kwh','difference_cad','calculated_forecast_kwh','continued_control_forecast_kwh','validation','reason'))+'</tr>' for row in rows)
     html='''<!doctype html><meta charset="utf-8"><title>Promenade energy overview</title><style>body{font:16px system-ui;margin:30px;color:#173247}section{padding:20px;background:#eff5f8;margin:18px 0}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:9px;border-bottom:1px solid #ccd5dc;text-align:left}svg{width:100%;max-width:1100px}select{padding:10px}strong{font-size:21px}.scroll{overflow:auto}</style><h1>Promenade forecast and savings comparison</h1><p>Unverified engineering comparison. Negative savings mean consumption exceeded the predicted baseline.</p><section id="totals"></section><section id="candidates"></section><section><label>Meter <select id="meter"></select></label><p id="dates"></p><p id="numbers"></p><p>Teal: reporting-period baseline. Blue: measured consumption. Orange: future baseline forecast.</p><svg id="chart" viewBox="0 0 1000 340" aria-label="Daily energy forecast and measured consumption"></svg><p id="quality"></p></section><p id="scope"></p><div class="scroll"><table><thead><tr><th>Meter</th><th>Source measured kWh (available days)</th><th>Meter days available/expected</th><th>Paired baseline kWh</th><th>Paired measured kWh</th><th>Complete savings kWh</th><th>Complete savings CAD</th><th>Future forecast kWh</th><th>Validation</th><th>Blocked reason</th></tr></thead><tbody>'''+table+'''</tbody></table></div><script>
 const D='''+data+''';const S=D.summary;const fmt=n=>n==null?'Unavailable':Number(n).toLocaleString(undefined,{maximumFractionDigits:2});const el=id=>document.getElementById(id);const total=S.site_total;
 el('totals').textContent='Site total: '+fmt(total.savings_kwh)+' kWh | CAD $'+fmt(total.savings_cad)+' at $'+S.rate_cad_per_kwh+'/kWh. '+(total.meter_ids.length?'Selected meters: '+total.meter_ids.join(', '):'Choose a verified non-overlapping meter boundary with --total-meters. All-meter sums would double-count overlapping loads.');
@@ -122,7 +221,26 @@ const past=v.reporting_periods||[],future=v.forecast_periods||[];const series=[[
     html=html.replace('Orange: future baseline forecast.','Orange: future baseline forecast. Purple: held-out BMS consumption estimate. Red: user-supplied optimized operating scenario. Fitted-history diagnostics are excluded from this chart.')
     html=html.replace('Unverified engineering comparison. Negative savings mean consumption exceeded the predicted baseline.',
         'Engineering comparison requiring review. Results with unresolved data, validation or sensitivity findings are withheld. Lines from withheld models are diagnostic only. Diagnostic differences are not verified savings. Negative differences mean measured energy exceeded the baseline.')
-    html=html.replace('Complete savings kWh','Complete comparison kWh').replace('Complete savings CAD','Complete comparison CAD')
+    html=html.replace('Complete savings kWh','Matched difference kWh').replace('Complete savings CAD','Matched difference CAD')
+    html=html.replace('Results with unresolved data, validation or sensitivity findings are withheld.', 'Calculated differences remain visible even when validation fails; review status identifies unreliable models.')
+    html=html.replace("fmt(m.savings_kwh)+' kWh | CAD $'+fmt(m.savings_cad)+' | Future baseline: '+fmt(m.forecast_kwh)","fmt(m.difference_kwh)+' kWh | CAD $'+fmt(m.difference_cad)+' | Future baseline: '+fmt(m.calculated_forecast_kwh)")
+    html=html.replace('Complete-period difference: ','Matched baseline minus meter: ')
+    html=html.replace('<th>Future forecast kWh</th>','<th>Future baseline kWh</th><th>Continued recent-control forecast kWh</th>')
+    html=html.replace("el('quality').textContent=m.validation", "el('numbers').textContent+=' | Continued recent-control forecast: '+fmt(m.continued_control_forecast_kwh)+' kWh / CAD $'+fmt(m.continued_control_forecast_cad)+' (assumes recent policy and loads continue; seasonal changes not modeled).';el('quality').textContent=m.validation")
+    html=html.replace("comparison '+fmt(m.savings_kwh)+' kWh / CAD $'+fmt(m.savings_cad)+'; future baseline '+fmt(m.forecast_kwh)","calculated difference '+fmt(m.difference_kwh)+' kWh / CAD $'+fmt(m.difference_cad)+' ('+m.difference_status+'); future baseline '+fmt(m.calculated_forecast_kwh)")
     html=html.replace("[future,'baseline_kwh','#d57b16']];const times=[...past,...future]", "[future,'baseline_kwh','#d57b16'],[v.response_periods||[],'bms_estimated_kwh','#8451a1'],[v.optimized_periods||[],'optimized_kwh','#b43f42']];const times=[...past,...future,...(v.response_periods||[]),...(v.optimized_periods||[])]")
+    html=html.replace("[v.optimized_periods||[],'optimized_kwh','#b43f42']];", "[v.optimized_periods||[],'optimized_kwh','#b43f42'],[v.setpoint_periods||[],'setpoint_estimated_kwh','#6a40bc']];")
+    html=html.replace("...(v.optimized_periods||[])]", "...(v.optimized_periods||[]),...(v.setpoint_periods||[])]")
+    html=html.replace("el('quality').textContent=m.validation", "el('numbers').textContent+=(m.setpoint_response_status?' | Setpoint model: '+fmt(m.diagnostic_setpoint_reconstruction_kwh)+' kWh reconstructed on '+m.setpoint_reconstruction_days+' reporting days; '+m.setpoint_heldout_days+' held-out days; test error '+fmt(m.setpoint_holdout_cvrmse_pct)+'%, bias '+fmt(m.setpoint_holdout_nmbe_pct)+'%. Partial reconstruction is not full-period consumption.':'');el('quality').textContent=m.validation")
+    html=html.replace('Purple: held-out BMS consumption estimate.', 'Purple: held-out BMS/setpoint consumption estimates; excludes fitted reconstruction.')
+    html=html.replace("el('meter').addEventListener('change',draw);draw();", "const initial=S.meters.find(m=>m.meter_id.toLowerCase()==='vm_total_load');if(initial)el('meter').value=initial.meter_id;el('meter').addEventListener('change',draw);draw();")
+    html=html.replace("el('quality').textContent=m.validation", "if(m.diagnostic_difference_cad!=null)el('numbers').textContent+=' | Withheld diagnostic difference: '+fmt(m.diagnostic_difference_kwh)+' kWh / CAD $'+fmt(m.diagnostic_difference_cad)+'; not released savings.';if(m.diagnostic_model_band_95_difference_cad)el('numbers').textContent+=' | Approximate model band: CAD $'+m.diagnostic_model_band_95_difference_cad.map(fmt).join(' to $')+'. A band crossing zero does not establish positive savings.';el('quality').textContent=m.validation")
+    audit_link=' | <a href="meter-reconciliation.csv">Virtual-meter reconciliation</a>' if (folder/'meter-reconciliation.csv').exists() else ''
+    html=html.replace('<p id="scope"></p>', '<p id="scope"></p><p><a href="financial-summary.json">CAD and energy summary</a> | <a href="setpoint-response-summary.csv">Setpoint-model validation</a> | <a href="meter-summary.csv">All-meter results</a>'+audit_link+'</p>')
+    html=html.replace('<p id="scope"></p>','<p id="scope"></p><p><a href="consumption-comparison-summary.csv">All calculated consumption differences</a> | <a href="consumption-comparison-daily.csv">Daily matched calculations</a></p>')
+    html=html.replace("el('quality').textContent=m.validation", "el('numbers').textContent+=' | Baseline minus optimizer reconstruction: '+fmt(m.baseline_optimizer_reconstruction_difference_kwh)+' kWh / CAD $'+fmt(m.baseline_optimizer_reconstruction_difference_cad)+' on '+m.baseline_optimizer_reconstruction_paired_days+' days. Meter minus optimizer: '+fmt(m.meter_optimizer_reconstruction_difference_kwh)+' kWh (prediction residual, not savings).';el('quality').textContent=m.validation")
+    html=html.replace("[v.setpoint_periods||[],'setpoint_estimated_kwh','#6a40bc']];", "[v.setpoint_periods||[],'setpoint_estimated_kwh','#6a40bc'],[v.continued_control_periods||[],'continued_control_kwh','#21834b']];")
+    html=html.replace("...(v.setpoint_periods||[])]", "...(v.setpoint_periods||[]),...(v.continued_control_periods||[])]")
+    html=html.replace('Orange: future baseline forecast.', 'Orange: future baseline forecast. Green: forecast assuming recent controlled operation continues.')
     (folder/'index.html').write_text(html,encoding='utf-8')
     return report

@@ -18,6 +18,6 @@
     72,
     73
   ],
-  "implemented": "OLS and Huber daily calendar regression, optional annual calendar terms, chronological selection and held-out validation, explicit quality review, model sensitivity; advanced CLI weather change-point models and separate BMS response regression",
+  "implemented": "OLS and Huber daily calendar regression, optional annual calendar terms, chronological selection and held-out validation, explicit quality review, model sensitivity; advanced CLI weather change-point models and separate BMS response regression; v0.6 multi-harmonic calendar candidates and low-dimensional conditional setpoint-response models with matched-date comparator and distinct reconstruction/test outputs",
   "excluded": "Not an implementation of every protocol model or automatic standards certification"
 }

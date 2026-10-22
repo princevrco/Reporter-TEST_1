@@ -64,12 +64,15 @@ def fit(rows,cfg):
         if not np.isfinite(p).all() or (p<0).any():raise DataError('Unphysical candidate baseline prediction')
         return p
     scores=[];finals={}
-    specs=[(d,e,False) for d in windows for e in estimators]
+    specs=[(d,e,0) for d in windows for e in estimators]
     if opt.get('annual_calendar_candidates',False):
-        specs += [(d,e,True) for d in windows for e in estimators if e!='weekday_median' and (d is None or d>=365)]
+        harmonics=opt.get('annual_harmonics',[1])
+        if not harmonics or any(type(h) is not int or not 1<=h<=3 for h in harmonics):raise DataError('Use annual harmonic orders from 1 to 3')
+        specs += [(d,e,h) for d in windows for e in estimators for h in harmonics if e!='weekday_median' and (d is None or d>=365)]
     for days,estimator,annual in specs:
-        model_terms=terms+([{'kind':'sin_year','harmonic':1},{'kind':'cos_year','harmonic':1}] if annual else [])
-        name=estimator+'_'+('all' if days is None else str(days))+('_annual' if annual else '')
+        model_terms=terms+[{'kind':kind,'harmonic':h} for h in range(1,annual+1) for kind in ('sin_year','cos_year')]
+        suffix='' if not annual else '_annual' if annual==1 else '_annual'+str(annual)
+        name=estimator+'_'+('all' if days is None else str(days))+suffix
         entry={'name':name,'estimator':estimator,'window_days':days,'status':'unavailable'}
         try:
             losses=[]
@@ -125,7 +128,9 @@ def fit(rows,cfg):
         'validation_scope':'Same final held-out calendar dates for every estimator/lookback; rolling inner folds alone select the model. Final refit uses the chosen lookback.',
         'holdout_start':outer.isoformat(),'holdout_end_exclusive':end.isoformat(),
         'source_protocol':'Engineering implementation inspired by IPMVP Option C; not automatic protocol certification',
-        'release_checks_enabled':True}
+        'release_checks_enabled':True,
+        'uncertainty_centering':'centered_bootstrap_and_holdout_residuals',
+        'development_note':'Historical development backtest; future independent validation remains required. No reporting energy enters baseline selection.'}
     artifact['model_id']=digest(artifact)
     return artifact
 

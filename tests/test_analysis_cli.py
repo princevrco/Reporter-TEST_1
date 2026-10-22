@@ -41,3 +41,11 @@ def test_combined_old_new_data_completes_requested_window(tmp_path):
     assert (out/'index.html').exists()
     assert json.loads((out/'overview.json').read_text())['meters'][0]['future_optimized_kwh'] is None
     assert json.loads((out/'merge-audit.json').read_text())['meter']['duplicate_rows_collapsed']==6
+    assert (out/'setpoint-response-summary.csv').exists()
+    money=json.loads((out/'financial-summary.json').read_text())
+    assert money['exact_savings_cad'] is None
+    assert money['meters'][0]['measured_energy_cost_cad_complete_period']==80.40
+    reconciliation=json.loads((out/'meter-reconciliation.json').read_text())
+    assert reconciliation['missing_days']>0
+    assert reconciliation['inconsistent_days']==0
+    assert all(r['children_sum_kwh'] is None for r in reconciliation['rows'])

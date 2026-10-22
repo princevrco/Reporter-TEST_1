@@ -26,5 +26,15 @@ def test_dashboard_forecasts_without_future_measured_energy(tmp_path):
     assert r['meters'][0]['forecast_kwh']>0
     assert r['meters'][0]['savings_cad']==pytest.approx(r['meters'][0]['savings_kwh']*.12)
     assert r['site_total']['forecast_kwh']==r['meters'][0]['forecast_kwh']
+    assert r['meters'][0]['difference_kwh']==pytest.approx(r['meters'][0]['baseline_kwh']-r['meters'][0]['measured_kwh'])
+    # Review gates must never hide calculable signed differences.
+    result_path=next(out.glob('meter-*/savings/result.json'))
+    result=json.loads(result_path.read_text());result.update(release_status='withheld_requires_review',
+        release_reasons=['heldout_model_error_requires_review'],savings_kwh_complete_period=None,savings_kwh_paired=None)
+    result_path.write_text(json.dumps(result))
+    rebuilt=build(out,.12,'2026-01-02','2026-01-05')
+    assert rebuilt['meters'][0]['difference_kwh']==pytest.approx(r['meters'][0]['difference_kwh'])
+    assert rebuilt['meters'][0]['savings_kwh'] is None
+    assert (out/'consumption-comparison-daily.csv').exists()
     assert (out/'index.html').exists() and 'future baseline forecast' in (out/'index.html').read_text()
     with pytest.raises(ValueError):build(out,-1)
