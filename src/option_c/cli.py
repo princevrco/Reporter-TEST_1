@@ -23,6 +23,7 @@ def main():
     batch.add_argument('--bms',type=Path,required=True);batch.add_argument('--kind',choices=['portal','utility','normalized','carma'],required=True)
     batch.add_argument('--carma-daily-kwh',action='store_true',help='Confirm CARMA export is daily Consumption kWh, not demand/cumulative/monthly data')
     batch.add_argument('--optimizer',type=Path,nargs='+',help='Optional optimizer CSV/JSON files with zone modes and valid/issue times')
+    batch.add_argument('--quality-reviews',type=Path,help='Documented decisions keyed by data-quality event IDs')
     batch.add_argument('--start',required=True);batch.add_argument('--end',required=True);batch.add_argument('--output',type=Path,required=True)
     train=commands.add_parser('train');train.add_argument('--config',type=Path,required=True);train.add_argument('--meter',type=Path,required=True);train.add_argument('--output',type=Path,required=True)
     agg=commands.add_parser('prepare-bms');agg.add_argument('--config',type=Path,required=True);agg.add_argument('--bms',type=Path,nargs='+',required=True);agg.add_argument('--output',type=Path,required=True)
@@ -38,7 +39,8 @@ def main():
     args=p.parse_args()
     try:
         if args.command=='run-all':
-            result=run_all(args.meter,args.bms,load(args.config),args.start,args.end,args.output,args.kind,args.carma_daily_kwh,args.optimizer)
+            result=run_all(args.meter,args.bms,load(args.config),args.start,args.end,args.output,args.kind,args.carma_daily_kwh,args.optimizer,
+                quality_reviews=load(args.quality_reviews) if args.quality_reviews else None)
             print(json.dumps(result,indent=2))
         elif args.command=='prepare-optimizer':
             zones,features,groups,audit=optimizer_prepare(args.optimizer,args.bms,load(args.config))

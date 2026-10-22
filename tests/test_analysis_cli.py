@@ -33,8 +33,9 @@ def test_combined_old_new_data_completes_requested_window(tmp_path):
     assert result['expected_periods']==67 and result['observed_meter_periods']==67
     assert result['reporting_kwh_paired']==670
     # Constant daily kWh crosses a 23-hour training day; the average-kW baseline
-    # handles real day lengths and may differ slightly from a constant-energy fit.
-    assert abs(result['savings_kwh_complete_period'])<.1
+    # handles real day lengths; a selected seasonal fit may also reflect DST.
+    # Require an error below 0.1% of the known synthetic reporting consumption.
+    assert abs(result['savings_kwh_complete_period'])<670*.001
     response=pd.read_csv(out/'response-summary.csv')
     assert response.status.iloc[0]=='fitted_requires_review'
     assert (out/'index.html').exists()

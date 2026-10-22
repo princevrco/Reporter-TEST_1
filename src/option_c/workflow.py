@@ -4,6 +4,7 @@ import pandas as pd
 from .data import DataError,digest,frame,records,stamp,window
 from .regression import fit,predict,verify,uncertainty_samples
 from .bms import join_features
+from .quality import withhold
 
 
 def train_post(meter_rows,bms_rows,cfg):
@@ -25,12 +26,17 @@ def forecast(model,condition_rows,start,end):
     if outside.any():gates.append('weather_or_operating_condition_extrapolation')
     if not good.all():gates.append('forecast_conditions_incomplete_or_unphysical_prediction')
     band=uncertainty_samples(model,x[good],f.hours.to_numpy()[good]) if good.any() else None
-    return {'schema':'option_c.forecast.v1','status':'conditional_forecast_requires_review','timezone':cfg['timezone'],'start':a.isoformat(),'end_exclusive':b.isoformat(),
+    result={'schema':'option_c.forecast.v1','status':'conditional_forecast_requires_review','timezone':cfg['timezone'],'start':a.isoformat(),'end_exclusive':b.isoformat(),
             'expected_periods':len(f),'predicted_periods':int(good.sum()),'baseline_kwh':float(np.nansum(pred)) if good.all() else None,
             'available_baseline_kwh':float(np.nansum(pred)) if good.any() else None,'aggregate_model_band_95_kwh':np.quantile(band,[.025,.975]).tolist() if band is not None else None,
             'gates':gates+['complete_uncertainty_budget_required'],'model_id':model['model_id'],
             'scope':'Conditional no-intervention energy forecast using supplied future weather/independent conditions; not savings or peak demand',
             'periods':[{'timestamp':t.isoformat(),'baseline_kwh':float(p) if v else None,'average_baseline_kw':float(p/h) if v else None,'outside_support':bool(o)} for t,p,v,o,h in zip(f.timestamp,pred,good,outside,f.hours)]}
+    reasons=[g for g in model['gates'] if g in ('heldout_model_error_requires_review','baseline_quality_review_required')]
+    if model.get('release_checks_enabled') and reasons:
+        result.update(release_status='withheld_requires_review',release_reasons=reasons,
+            diagnostic_baseline_kwh=result['baseline_kwh'],baseline_kwh=None,status='diagnostic_forecast_requires_review')
+    return result
 
 
 def savings(baseline,reporting_rows,start,end,post_model=None,bms_rows=None,adjustments=None,flat_rate=None):
@@ -104,4 +110,10 @@ def savings(baseline,reporting_rows,start,end,post_model=None,bms_rows=None,adju
         rate=float(flat_rate['rate_per_kwh'])
         if not np.isfinite(rate) or rate<0 or not flat_rate.get('reference'):raise DataError('Rate must be finite, nonnegative and documented')
         result['variable_energy_cost_savings_paired']={'amount':paired*rate if paired is not None else None,'currency':flat_rate.get('currency','CAD'),'rate_reference':flat_rate['reference'],'scope':'Same flat energy rate only; excludes demand charges, taxes, fixed charges, ratchets and Global Adjustment'}
+    reasons=[g for g in baseline['gates'] if g in ('heldout_model_error_requires_review','baseline_quality_review_required')]
+    if baseline.get('release_checks_enabled') and reasons:
+        withhold(result,reasons)
+        if flat_rate:
+            result['variable_energy_cost_savings_paired']['diagnostic_amount']=result['variable_energy_cost_savings_paired']['amount']
+            result['variable_energy_cost_savings_paired']['amount']=None
     return result

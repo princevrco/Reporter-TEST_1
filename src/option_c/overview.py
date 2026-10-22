@@ -14,6 +14,9 @@ def total(results,selected,rate):
     if len(selected)!=len(set(selected)):raise DataError('Duplicate total meter IDs')
     if any(m not in results for m in selected):
         return {'status':'selected_meter_unavailable','meter_ids':selected,'savings_kwh':None,'savings_cad':None}
+    if any(results[m].get('release_status')=='withheld_requires_review' for m in selected):
+        return {'status':'selected_model_or_data_review_required','meter_ids':selected,'savings_kwh':None,'savings_cad':None,
+            'note':'At least one selected meter has withheld results. Do not sum diagnostic differences.'}
     maps=[{p['timestamp']:p for p in results[m]['periods']} for m in selected]
     timestamps=set(maps[0])
     if any(set(m)!=timestamps for m in maps):raise DataError('Selected meters have different reporting grids')
@@ -31,8 +34,8 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
     folder=Path(folder);summary=load(folder/'summary.json');results={};rows=[];views=[]
     if not np.isfinite(rate) or rate<0:raise DataError('Rate must be finite and nonnegative')
     first=next((e for e in summary['meters'] if (folder/e['folder']/'baseline-model.json').exists()),None)
-    if first is None:raise DataError('No fitted baseline models; inspect summary.json blocked reasons')
-    timezone=load(folder/first['folder']/'baseline-model.json')['config']['timezone']
+    if first is None and not summary.get('timezone'):raise DataError('No fitted baseline models; inspect summary.json blocked reasons')
+    timezone=load(folder/first['folder']/'baseline-model.json')['config']['timezone'] if first else summary['timezone']
     start=forecast_start or str(pd.Timestamp.now(tz=timezone).date())
     end=forecast_end or str((pd.Timestamp(start)+pd.DateOffset(months=3)).date())
     a,b=stamp(start,timezone,True),stamp(end,timezone,True)
@@ -42,6 +45,8 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
         meter=entry['meter_id'];base=folder/entry['folder'];row={'meter_id':meter,'status':entry['status'],
             'is_virtual_meter':entry.get('is_virtual_meter',False),'meter_description':entry.get('meter_description',''),
             'future_optimized_kwh':None,'future_savings_kwh':None,'future_savings_cad':None}
+        row.update({k:v for k,v in entry.items() if k.startswith('meter_consumption_')})
+        row['meter_consumption_coverage']=str(entry.get('meter_consumption_observed_days','?'))+'/'+str(entry.get('meter_consumption_expected_days','?'))
         result_path=base/'savings/result.json'
         if result_path.exists():
             r=load(result_path);results[meter]=r
@@ -52,6 +57,11 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
                        rate_cad_per_kwh=rate,unavailable_periods=r.get('unavailable_periods'),
                        validation='Held-out error failed' if 'heldout_model_error_requires_review' in r.get('gates',[]) else 'Numerical screen passed; site review pending',
                        gates=';'.join(r.get('gates',[])))
+            row.update(release_status=r.get('release_status','provisional_requires_review'),release_reasons=';'.join(r.get('release_reasons',[])),
+                diagnostic_difference_kwh=r.get('diagnostic_savings_kwh_paired'),
+                diagnostic_difference_cad=r['diagnostic_savings_kwh_paired']*rate if r.get('diagnostic_savings_kwh_paired') is not None else None,
+                selected_baseline=entry.get('selected_baseline'))
+            if r.get('release_status')=='withheld_requires_review':row['validation']='Withheld: '+row['release_reasons']
             views.append({'meter_id':meter,'reporting_periods':r['periods'],'gates':r.get('gates',[])})
         else:row.update(reason=entry.get('reason'),savings_kwh=None,savings_cad=None)
         if (base/'baseline-model.json').exists():
@@ -60,7 +70,7 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
                 grid=pd.date_range(a.tz_convert(timezone),b.tz_convert(timezone),freq='D',inclusive='left')
                 conditions=[{'date':t.date().isoformat(),'meter_id':meter} for t in grid]
                 f=forecast(model,conditions,start,end);write(f,base/'future-forecast')
-                row.update(forecast_kwh=f['baseline_kwh'],forecast_baseline_cad=f['baseline_kwh']*rate if f['baseline_kwh'] is not None else None,forecast_status=f['status'])
+                row.update(forecast_kwh=f['baseline_kwh'],forecast_baseline_cad=f['baseline_kwh']*rate if f['baseline_kwh'] is not None else None,forecast_status=f['status'],diagnostic_forecast_kwh=f.get('diagnostic_baseline_kwh'))
                 forecasts.append({'meter_id':meter,'baseline_kwh':f['baseline_kwh']})
                 daily_forecasts.extend({'meter_id':meter,**period} for period in f['periods'])
                 if views and views[-1]['meter_id']==meter:views[-1]['forecast_periods']=f['periods']
@@ -84,7 +94,10 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
                 eligible={p['date']:p for p in future if start<=p['date']<end}
                 expected=pd.date_range(a.tz_convert(timezone),b.tz_convert(timezone),freq='D',inclusive='left').date.astype(str)
                 if all(d in eligible and eligible[d]['bms_estimated_kwh'] is not None and not eligible[d]['outside_training_support'] for d in expected):
-                    row['future_optimized_kwh']=sum(eligible[d]['bms_estimated_kwh'] for d in expected)
+                    value=sum(eligible[d]['bms_estimated_kwh'] for d in expected)
+                    if any(g in response['gates'] for g in ('heldout_model_error_requires_review','meter_quality_review_required','bms_signal_semantics_unverified')):
+                        row['diagnostic_future_optimized_kwh']=value
+                    else:row['future_optimized_kwh']=value
         rows.append(row)
     selected=total_meters or [];totals=total(results,selected,rate)
     fm={f['meter_id']:f['baseline_kwh'] for f in forecasts}
@@ -98,15 +111,18 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
     pd.DataFrame(daily_forecasts).to_csv(folder/'forecast-daily.csv',index=False)
     pd.DataFrame(candidates).to_csv(folder/'boundary-candidates.csv',index=False)
     data=json.dumps({'summary':report,'views':views},allow_nan=False).replace('<','\\u003c')
-    table=''.join('<tr>'+''.join('<td>'+escape('Unavailable' if row.get(k) is None else f'{row[k]:,.2f}' if isinstance(row[k],float) else str(row[k]))+'</td>' for k in ('meter_id','baseline_kwh','measured_kwh','savings_kwh','savings_cad','forecast_kwh','validation','reason'))+'</tr>' for row in rows)
-    html='''<!doctype html><meta charset="utf-8"><title>Promenade energy overview</title><style>body{font:16px system-ui;margin:30px;color:#173247}section{padding:20px;background:#eff5f8;margin:18px 0}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:9px;border-bottom:1px solid #ccd5dc;text-align:left}svg{width:100%;max-width:1100px}select{padding:10px}strong{font-size:21px}.scroll{overflow:auto}</style><h1>Promenade forecast and savings comparison</h1><p>Unverified engineering comparison. Negative savings mean consumption exceeded the predicted baseline.</p><section id="totals"></section><section id="candidates"></section><section><label>Meter <select id="meter"></select></label><p id="dates"></p><p id="numbers"></p><p>Teal: reporting-period baseline. Blue: measured consumption. Orange: future baseline forecast.</p><svg id="chart" viewBox="0 0 1000 340" aria-label="Daily energy forecast and measured consumption"></svg><p id="quality"></p></section><p id="scope"></p><div class="scroll"><table><thead><tr><th>Meter</th><th>Paired baseline kWh</th><th>Paired measured kWh</th><th>Complete savings kWh</th><th>Complete savings CAD</th><th>Future forecast kWh</th><th>Validation</th><th>Blocked reason</th></tr></thead><tbody>'''+table+'''</tbody></table></div><script>
+    table=''.join('<tr>'+''.join('<td>'+escape('Unavailable' if row.get(k) is None else f'{row[k]:,.2f}' if isinstance(row[k],float) else str(row[k]))+'</td>' for k in ('meter_id','meter_consumption_kwh_available','meter_consumption_coverage','baseline_kwh','measured_kwh','savings_kwh','savings_cad','forecast_kwh','validation','reason'))+'</tr>' for row in rows)
+    html='''<!doctype html><meta charset="utf-8"><title>Promenade energy overview</title><style>body{font:16px system-ui;margin:30px;color:#173247}section{padding:20px;background:#eff5f8;margin:18px 0}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:9px;border-bottom:1px solid #ccd5dc;text-align:left}svg{width:100%;max-width:1100px}select{padding:10px}strong{font-size:21px}.scroll{overflow:auto}</style><h1>Promenade forecast and savings comparison</h1><p>Unverified engineering comparison. Negative savings mean consumption exceeded the predicted baseline.</p><section id="totals"></section><section id="candidates"></section><section><label>Meter <select id="meter"></select></label><p id="dates"></p><p id="numbers"></p><p>Teal: reporting-period baseline. Blue: measured consumption. Orange: future baseline forecast.</p><svg id="chart" viewBox="0 0 1000 340" aria-label="Daily energy forecast and measured consumption"></svg><p id="quality"></p></section><p id="scope"></p><div class="scroll"><table><thead><tr><th>Meter</th><th>Source measured kWh (available days)</th><th>Meter days available/expected</th><th>Paired baseline kWh</th><th>Paired measured kWh</th><th>Complete savings kWh</th><th>Complete savings CAD</th><th>Future forecast kWh</th><th>Validation</th><th>Blocked reason</th></tr></thead><tbody>'''+table+'''</tbody></table></div><script>
 const D='''+data+''';const S=D.summary;const fmt=n=>n==null?'Unavailable':Number(n).toLocaleString(undefined,{maximumFractionDigits:2});const el=id=>document.getElementById(id);const total=S.site_total;
 el('totals').textContent='Site total: '+fmt(total.savings_kwh)+' kWh | CAD $'+fmt(total.savings_cad)+' at $'+S.rate_cad_per_kwh+'/kWh. '+(total.meter_ids.length?'Selected meters: '+total.meter_ids.join(', '):'Choose a verified non-overlapping meter boundary with --total-meters. All-meter sums would double-count overlapping loads.');
 el('scope').textContent=S.scope;for(const v of D.views){const o=document.createElement('option');o.value=v.meter_id;o.textContent=v.meter_id;el('meter').append(o)}
 el('candidates').textContent='Existing virtual totals (unverified candidates; never added together): '+S.unverified_boundary_candidates.map(m=>m.meter_id+': comparison '+fmt(m.savings_kwh)+' kWh / CAD $'+fmt(m.savings_cad)+'; future baseline '+fmt(m.forecast_kwh)+' kWh').join(' | ');
-function draw(){const v=D.views.find(x=>x.meter_id===el('meter').value);if(!v)return;const m=S.meters.find(x=>x.meter_id===v.meter_id);el('dates').textContent='Comparison: '+S.start+' to '+S.end_exclusive+' exclusive. Forecast: '+S.forecast_start+' to '+S.forecast_end_exclusive+' exclusive.';el('numbers').textContent='Complete-period difference: '+fmt(m.savings_kwh)+' kWh | CAD $'+fmt(m.savings_cad)+' | Future baseline: '+fmt(m.forecast_kwh)+' kWh';el('quality').textContent=m.validation+' | '+v.gates.join('; ');
+function draw(){const v=D.views.find(x=>x.meter_id===el('meter').value);if(!v)return;const m=S.meters.find(x=>x.meter_id===v.meter_id);el('dates').textContent='Comparison: '+S.start+' to '+S.end_exclusive+' exclusive. Forecast: '+S.forecast_start+' to '+S.forecast_end_exclusive+' exclusive.';el('numbers').textContent='Source consumption: '+fmt(m.meter_consumption_kwh_available)+' kWh across '+m.meter_consumption_coverage+' days. Complete-period difference: '+fmt(m.savings_kwh)+' kWh | CAD $'+fmt(m.savings_cad)+' | Future baseline: '+fmt(m.forecast_kwh)+' kWh';el('quality').textContent=m.validation+' | '+v.gates.join('; ');
 const past=v.reporting_periods||[],future=v.forecast_periods||[];const series=[[past,'baseline_kwh','#087d80'],[past,'reporting_kwh','#3265ad'],[future,'baseline_kwh','#d57b16']];const times=[...past,...future].map(r=>Date.parse(r.timestamp));if(!times.length)return;const lo=Math.min(...times),hi=Math.max(...times);const values=series.flatMap(([rs,k])=>rs.map(r=>r[k]).filter(x=>x!=null));const max=Math.max(1,...values)*1.1;const svg=el('chart');svg.innerHTML='';const make=(tag,attrs,text)=>{const n=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const[k,x]of Object.entries(attrs))n.setAttribute(k,x);if(text!=null)n.textContent=text;svg.append(n);return n};for(let i=0;i<5;i++){const y=280-i*60;make('line',{x1:75,x2:970,y1:y,y2:y,stroke:'#ccd5dc'});make('text',{x:5,y:y+5,'font-size':12},fmt(max*i/4))}make('text',{x:75,y:20,'font-size':13},'Daily kWh');for(const[rs,k,color]of series){let points=[];const flush=()=>{if(points.length)make('polyline',{points:points.join(' '),fill:'none',stroke:color,'stroke-width':2});points=[]};for(const r of rs){if(r[k]==null){flush();continue}const x=75+(Date.parse(r.timestamp)-lo)/Math.max(1,hi-lo)*895,y=280-r[k]/max*240;points.push(x+','+y);const dot=make('circle',{cx:x,cy:y,r:3,fill:color});const title=document.createElementNS('http://www.w3.org/2000/svg','title');title.textContent=r.timestamp+' '+fmt(r[k])+' kWh';dot.append(title)}flush()}make('text',{x:75,y:315,'font-size':12},new Date(lo).toISOString().slice(0,10));make('text',{x:970,y:315,'font-size':12,'text-anchor':'end'},new Date(hi).toISOString().slice(0,10))}el('meter').addEventListener('change',draw);draw();</script>'''
     html=html.replace('Orange: future baseline forecast.','Orange: future baseline forecast. Purple: held-out BMS consumption estimate. Red: user-supplied optimized operating scenario. Fitted-history diagnostics are excluded from this chart.')
+    html=html.replace('Unverified engineering comparison. Negative savings mean consumption exceeded the predicted baseline.',
+        'Engineering comparison requiring review. Results with unresolved data, validation or sensitivity findings are withheld. Lines from withheld models are diagnostic only. Diagnostic differences are not verified savings. Negative differences mean measured energy exceeded the baseline.')
+    html=html.replace('Complete savings kWh','Complete comparison kWh').replace('Complete savings CAD','Complete comparison CAD')
     html=html.replace("[future,'baseline_kwh','#d57b16']];const times=[...past,...future]", "[future,'baseline_kwh','#d57b16'],[v.response_periods||[],'bms_estimated_kwh','#8451a1'],[v.optimized_periods||[],'optimized_kwh','#b43f42']];const times=[...past,...future,...(v.response_periods||[]),...(v.optimized_periods||[])]")
     (folder/'index.html').write_text(html,encoding='utf-8')
     return report

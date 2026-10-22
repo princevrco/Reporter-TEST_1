@@ -39,6 +39,7 @@ def main():
     p.add_argument('--start',default='2026-08-15')
     p.add_argument('--end',default='2026-10-21',help='Exclusive local date')
     p.add_argument('--output',type=Path,default=Path('results/promenade-test'))
+    p.add_argument('--quality-reviews',type=Path,help='Documented meter-quality review ledger')
     p.add_argument('--rate',type=float,default=.12,help='Assumed CAD per kWh')
     p.add_argument('--forecast-start');p.add_argument('--forecast-end',help='Exclusive local date')
     p.add_argument('--total-meters',nargs='+',help='Non-overlapping meters selected for site total')
@@ -55,6 +56,7 @@ def main():
             meter=Path(temp);extract_meter(args.meter,meter)
             print('Meter archive extracted. Validating daily files and fitting every meter; this can take several minutes.',flush=True)
         summary=run(meter,args.bms,cfg,args.start,args.end,args.output,kind='carma',carma_daily_kwh=True,
+                    quality_reviews=load(args.quality_reviews) if args.quality_reviews else None,
                     progress=lambda entry,index,total:print(f"[{index}/{total}] {entry['meter_id']}: {entry['status']}",flush=True))
     entries=summary['meters']
     import pandas as pd

@@ -8,6 +8,7 @@ from option_c.ingestion import merge_meters,merge_bms
 from option_c.response import discover,features,fit,predict
 from option_c.batch import run
 from option_c.overview import build
+from option_c.quality import assess
 
 
 def main():
@@ -16,6 +17,7 @@ def main():
     p.add_argument('--bms',type=Path,nargs='+',required=True,help='Oldest to newest BMS history/update CSV')
     p.add_argument('--config',type=Path,default=Path('config/promenade-test.json'))
     p.add_argument('--response-config',type=Path,help='Reviewed role-to-column bindings; otherwise propose bindings from names')
+    p.add_argument('--quality-reviews',type=Path,help='Reviewed meter-quality decisions; original readings are preserved')
     p.add_argument('--overlap-policy',choices=['error','prefer-last'],default='error')
     p.add_argument('--start',default='2026-08-15');p.add_argument('--end',default='2026-10-21',help='Exclusive local date')
     p.add_argument('--rate',type=float,default=.12);p.add_argument('--output',type=Path,default=Path('results/aug15-oct20'))
@@ -27,6 +29,7 @@ def main():
     try:
         if a.output.exists():raise DataError('Choose a new --output directory; existing outputs are preserved')
         cfg=load(a.config)
+        reviews=load(a.quality_reviews) if a.quality_reviews else []
         a.forecast_start=a.forecast_start or str(pd.Timestamp.now(tz=cfg['timezone']).date())
         a.forecast_end=a.forecast_end or str((pd.Timestamp(a.forecast_start)+pd.DateOffset(months=3)).date())
         if pd.Timestamp(a.end)<=pd.Timestamp(a.start):raise DataError('End must follow start')
@@ -44,11 +47,18 @@ def main():
         try:
             feature_frame,audit=features(bms,rcfg,cfg['timezone'])
             feature_frame.to_csv(prepared/'daily-features.csv',index=False);save(prepared/'feature-audit.json',audit)
+            pd.DataFrame([{'point':k,**v} for k,v in audit['signal_audit'].items()]).to_csv(prepared/'point-coverage.csv',index=False)
         except DataError as exc:save(prepared/'feature-audit.json',{'status':'unavailable','reason':str(exc)})
         if a.prepare_only:
+            events=[]
+            for meter,g in meters.groupby('meter_id'):
+                _,found,_=assess(g,{**cfg,'meter_id':str(meter)},a.start,a.end,reviews);events.extend(found)
+            save(out/'data-quality-events.json',events)
+            pd.DataFrame(events).to_csv(out/'data-quality-events.csv',index=False)
             print('Merged inputs and proposed mappings: '+str(out));return
         run(out/'merged-meter.csv',out/'merged-bms.csv',cfg,a.start,a.end,out,kind='normalized',
-            progress=lambda e,i,n:print(f"[{i}/{n}] {e['meter_id']}: {e['status']}",flush=True))
+            progress=lambda e,i,n:print(f"[{i}/{n}] {e['meter_id']}: {e['status']}",flush=True),quality_reviews=reviews)
+        if (out/'quality-reviewed-meter.csv').exists():meters=pd.read_csv(out/'quality-reviewed-meter.csv',dtype={'meter_id':str})
         scenarios={}
         for name,path in (('optimized',a.future_bms),('old_policy',a.baseline_future_bms)):
             if path:
@@ -82,8 +92,10 @@ def main():
                         old=predictions['old_policy'].get(day,{});opt=predictions['optimized'].get(day,{})
                         good=all(r.get('bms_estimated_kwh') is not None and not r.get('outside_training_support',True) for r in (old,opt))
                         value=old['bms_estimated_kwh']-opt['bms_estimated_kwh'] if good else None
+                        released=not any(g in model['gates'] for g in ('heldout_model_error_requires_review','meter_quality_review_required','bms_signal_semantics_unverified'))
                         comparison.append({'date':day,'old_policy_kwh':old.get('bms_estimated_kwh'),'optimized_kwh':opt.get('bms_estimated_kwh'),
-                            'projected_difference_kwh':value,'projected_difference_cad':value*a.rate if value is not None else None,
+                            'projected_difference_kwh':value if released else None,'projected_difference_cad':value*a.rate if value is not None and released else None,
+                            'diagnostic_projected_difference_kwh':value,'release_status':'conditional_requires_review' if released else 'withheld_requires_review',
                             'scope':'conditional_scenario_difference_not_verified_savings','semantics_verified':rcfg.get('semantics_verified',False)})
                     pd.DataFrame(comparison).to_csv(folder/'scenario-comparison.csv',index=False)
             except (DataError,ValueError,KeyError) as exc:row['reason']=str(exc)

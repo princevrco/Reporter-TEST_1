@@ -24,6 +24,12 @@ def matrix(f,terms,cfg):
         elif kind=='hdd':v=np.maximum(term['base_c']-temperature,0)
         elif kind=='cdd':v=np.maximum(temperature-term['base_c'],0)
         elif kind=='weekday':v=(local.dt.dayofweek.to_numpy()==term['day']).astype(float)
+        elif kind in ('sin_year','cos_year'):
+            # Site-local annual phase with the actual calendar-year length.
+            doy=local.dt.dayofyear.to_numpy()-1
+            length=np.where(local.dt.is_leap_year.to_numpy(),366.,365.)
+            phase=2*np.pi*term.get('harmonic',1)*doy/length
+            v=np.sin(phase) if kind=='sin_year' else np.cos(phase)
         elif kind=='sin_hour':v=np.sin(2*np.pi*term['harmonic']*(local.dt.hour.to_numpy()+local.dt.minute.to_numpy()/60)/24)
         elif kind=='cos_hour':v=np.cos(2*np.pi*term['harmonic']*(local.dt.hour.to_numpy()+local.dt.minute.to_numpy()/60)/24)
         elif kind in ('independent','bms'):v=pd.to_numeric(f[term['column']],errors='coerce').to_numpy(float)

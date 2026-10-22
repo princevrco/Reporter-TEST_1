@@ -3,13 +3,15 @@ from copy import deepcopy
 import hashlib
 from pathlib import Path
 import pandas as pd
-from .data import DataError,records,save,stamp,step_end
+from .data import DataError,records,save,stamp,step_end,digest
 from .importers import prepare,discover
 from .regression import fit
 from .workflow import forecast,savings
 from .reporting import write
 from .optimizer import prepare as prepare_optimizer,summaries as optimizer_summaries
 from .effects import analyze as analyze_effects
+from .quality import assess,withhold
+from .resilient import fit as resilient_fit,sensitivity
 
 
 def bms_context(path,timezone):
@@ -30,7 +32,7 @@ def bms_context(path,timezone):
     return context,audit
 
 
-def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=False,optimizer_paths=None,progress=None):
+def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=False,optimizer_paths=None,progress=None,quality_reviews=None):
     if cfg.get('resolution')!='daily':raise DataError('Raw all-meter workflow currently supports daily kWh only')
     if cfg.get('independent_variables'):raise DataError('Two-file mode does not accept separate independent variables; use the full workflow')
     a,b=stamp(start,cfg['timezone'],True),stamp(end,cfg['timezone'],True)
@@ -61,7 +63,7 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
         run_rows=[{'zone_id':zone['zone_id'],**run} for zone in optimizer_audit['zone_on_run_statistics'] for run in zone['runs']]
         pd.DataFrame(run_rows).to_csv(out/'zone-on-runs.csv',index=False)
         save(out/'zone-duration-summary.json',{'zones':profiles,'scope':'Estimated thermal-mode durations; duration shares are not meter energy shares'})
-    summary={'schema':'option_c.all_meters.v1','selection':'all available meters, analyzed separately',
+    summary={'timezone':cfg['timezone'],'schema':'option_c.all_meters.v1','selection':'all available meters, analyzed separately',
              'meter_source_sha256':source_audit['sha256'] if source_audit else hashlib.sha256(Path(meter_path).read_bytes()).hexdigest(),
              'source_kind':kind,'carma_daily_kwh_operator_confirmed':carma_daily_kwh if kind=='carma' else None,
              'start':start,'end_exclusive':end,'meters':[],
@@ -80,6 +82,9 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
             'Optimizer modes and threshold consistency do not prove physical equipment operation',
             'Zone-meter percentages are statistical associations; physical mappings and causal effects require review',
             'Operation predictions remain separate from actual reporting consumption and measured savings']
+    quality_events=[];reviewed_parts=[]
+    resilient=cfg.get('baseline_options',{}).get('enabled',False)
+    quality_enabled=cfg.get('data_quality',{}).get('enabled',False)
     for meter in meters:
         meter=str(meter);folder=out/('meter-'+hashlib.sha256(meter.encode()).hexdigest()[:16])
         folder.mkdir(exist_ok=True)
@@ -94,9 +99,33 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
             c.setdefault('review',{})['meter_boundary_verified']=False
             # Deliberately use calendar-only regression consistently in two-file mode.
             part=part.drop(columns=['temperature_c'],errors='ignore').copy()
+            # Report source consumption independently of whether a baseline can be fitted.
+            observed=part[(part.date>=first)&(part.date<last)].copy()
+            energy=pd.to_numeric(observed.energy_kwh,errors='coerce')
+            if 'quality' in observed:energy=energy.where(observed.quality.eq('good'))
+            if ((energy.dropna()<0)|energy.dropna().isin([float('inf'),float('-inf')])).any():raise DataError('Invalid reporting consumption')
+            expected=len(pd.date_range(a.tz_convert(c['timezone']),b.tz_convert(c['timezone']),freq='D',inclusive='left'))
+            count=int(energy.notna().sum());value=float(energy.sum()) if count else None
+            consumption={'meter_consumption_kwh_available':value,
+                'meter_consumption_kwh_complete_period':value if count==expected else None,
+                'meter_consumption_observed_days':count,'meter_consumption_expected_days':expected,
+                'scope':'Source meter consumption before review decisions; may include flagged readings. Separate meters must not be summed without a verified non-overlapping boundary.'}
+            entry.update({k:v for k,v in consumption.items() if k!='scope'})
+            save(folder/'meter-consumption.json',consumption)
+            quality_stats={}
+            if quality_enabled:
+                part,events,quality_stats=assess(part,c,first,last,quality_reviews)
+                quality_events.extend(events);reviewed_parts.append(part)
+                save(folder/'data-quality.json',{'events':events,'summary':quality_stats})
             times=[stamp(x,c['timezone'],True) for x in part.date]
             history=part.loc[[step_end(t,c)<=baseline_end for t in times]]
-            model=fit(records(history),c);save(folder/'baseline-model.json',model)
+            model=resilient_fit(records(history),c) if resilient else fit(records(history),c)
+            if quality_stats:
+                model['baseline_quality_summary']={k:quality_stats[k] for k in ('unresolved_baseline_events','screen_reference_median_kwh','screen_spike_threshold_kwh') if k in quality_stats}
+                model['release_checks_enabled']=True
+                if quality_stats.get('unresolved_baseline_events'):model['gates'].append('baseline_quality_review_required')
+                model['model_id']=digest({k:v for k,v in model.items() if k!='model_id'})
+            save(folder/'baseline-model.json',model)
             grid=pd.date_range(a.tz_convert(c['timezone']),b.tz_convert(c['timezone']),freq='D',inclusive='left')
             periods=pd.DataFrame({'date':grid.date.astype(str),'meter_id':meter})
             periods=periods.merge(part,on=['date','meter_id'],how='left',validate='one_to_one')
@@ -104,6 +133,15 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
             projection=forecast(model,rows,start,end)
             write(projection,folder/'forecast')
             result=savings(model,rows,start,end)
+            if resilient:
+                comparison=sensitivity(model,rows)
+                save(folder/'baseline-comparison.json',comparison)
+                result['baseline_comparison']=comparison
+                reasons=[]
+                if quality_stats.get('unresolved_reporting_events'):reasons.append('reporting_quality_review_required')
+                if comparison['passing_model_spread_pct'] is not None and comparison['passing_model_spread_pct']>comparison['threshold_pct']:
+                    reasons.append('baseline_method_sensitivity_high')
+                if reasons:withhold(result,reasons)
             if optimizer_paths:
                 effects=analyze_effects(records(part),features,groups,c,first,last)
                 save(folder/'zone-meter-effects.json',effects)
@@ -129,6 +167,9 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
                          unavailable_periods=result['unavailable_periods'],
                          savings_kwh_complete_period=result['savings_kwh_complete_period'],
                          savings_kwh_paired=result['savings_kwh_paired'])
+            if resilient:
+                entry.update(release_status=result.get('release_status'),release_reasons=result.get('release_reasons',[]),
+                    diagnostic_savings_kwh_paired=result.get('diagnostic_savings_kwh_paired'),selected_baseline=model['family'])
         except (DataError,ValueError,KeyError) as exc:
             entry.update(status='blocked',reason=str(exc))
             if optimizer_paths:
@@ -143,9 +184,21 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
     summary['meter_count']=len(summary['meters'])
     summary['blocked_meter_count']=sum(m['status']=='blocked' for m in summary['meters'])
     summary['status']='all_meters_blocked' if summary['blocked_meter_count']==summary['meter_count'] else 'completed_requires_review'
+    if quality_enabled:
+        columns=['event_id','meter_id','code','phase','start_date','end_exclusive','days','energy_kwh','detail','review_status','decision','reference','reviewer']
+        pd.DataFrame(quality_events,columns=columns).to_csv(out/'data-quality-events.csv',index=False)
+        save(out/'data-quality-events.json',quality_events)
+        if reviewed_parts:pd.concat(reviewed_parts,ignore_index=True).to_csv(out/'quality-reviewed-meter.csv',index=False)
+        used={e['event_id'] for e in quality_events if e['review_status']=='reviewed'}
+        save(out/'quality-review-summary.json',{'events':len(quality_events),'reviewed':len(used),
+            'unreviewed':sum(e['review_status']=='unreviewed' for e in quality_events),
+            'unused_review_ids':[r['event_id'] for r in quality_reviews or [] if r['event_id'] not in used],
+            'policy':'Raw readings remain preserved. Only documented, matching review decisions can exclude or correct a reading.'})
     if optimizer_paths:
         pd.DataFrame(zone_effect_rows).to_csv(out/'zone-meter-effects.csv',index=False)
         save(out/'zone-meter-effects.json',{'effects':zone_effect_rows,
              'scope':'Per-meter statistical associations. Do not sum across overlapping meter boundaries or treat duration shares as energy savings.'})
+    consumption_columns=['meter_id','meter_consumption_kwh_available','meter_consumption_kwh_complete_period','meter_consumption_observed_days','meter_consumption_expected_days']
+    pd.DataFrame(summary['meters']).reindex(columns=consumption_columns).to_csv(out/'meter-consumption.csv',index=False)
     save(out/'summary.json',summary)
     return summary

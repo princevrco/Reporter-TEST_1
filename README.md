@@ -1,7 +1,7 @@
 # Promenade energy analysis
 
 Daily meter baseline regression, energy forecasting and measurement-and-verification
-review tools. Version **0.4.0**. Python **3.11 or 3.12**. Runs on CPU.
+review tools. Version **0.5.0**. Python **3.11 or 3.12**. Runs on CPU.
 
 The project analyzes all supplied meters independently. It compares measured energy
 with a frozen historical baseline, forecasts baseline consumption for a selectable
@@ -95,6 +95,98 @@ or loosen validation limits merely to obtain a positive savings result.
 
 `config/site.json` is an example for the advanced CLI, including illustrative BMS
 point mappings. It is not a commissioned all-asset configuration.
+
+## Meter download for the next test
+
+Export **daily Consumption kWh for every available meter from January 1, 2025
+through October 20, 2026 inclusive**. If CARMA uses an exclusive end date, select
+October 21, 2026. Retain meter IDs, descriptions, date conventions and exporter
+quality/checksum companions. Keep real zeros; do not replace missing days with zero.
+A complete replacement export is preferable when CARMA has revised historical values.
+
+The export should cover both historical training and the entire reporting period.
+Recheck June 10 and November 2, 2025 in particular: the earlier virtual-total export
+contained exceptionally large daily readings on those dates. A flag is an investigation
+request, not proof that the reading is wrong. Confirm corrected values with CARMA.
+
+## Baseline selection and meter quality
+
+The supplied configurations enable the v0.5 daily baseline workflow:
+
+- Fit ordinary least squares, Huber robust regression and weekday median baselines
+  over all available historical data, the latest 365 days and the latest 180 days.
+- Also test a simple annual sine/cosine calendar pattern for OLS/Huber when each
+  fitting window contains at least a year with 90% coverage. It requires no weather
+  file; it represents recurring calendar seasonality, not actual weather adjustment.
+- Select the estimator/lookback using up to three rolling historical validation folds
+  of 28 calendar days. At least two folds and 60 valid training days are required.
+- Keep the final 56 historical calendar days as a shared, untouched test period.
+  Every candidate is evaluated on those same dates; at least 80% coverage is required.
+  Selection uses inner-fold error, never reporting-period savings or outer-test error.
+- Refit the selected method on its chosen historical lookback. Preserve candidate
+  results and compare reporting-period estimates from validation-passing alternatives.
+  A spread above 10% of the selected baseline triggers review.
+- Screen for extreme spikes, sustained zero runs and historical level changes.
+  Screening thresholds are configurable engineering heuristics, not IPMVP limits.
+  Flags preserve the source reading and withhold headline comparisons until reviewed.
+
+The default held-out limits are CVRMSE <=20% and absolute NMBE <=5%. These are project
+screens, not proof of standards compliance. A robust fit reduces the influence of
+outliers but does not establish that they are invalid. Failed validation, unresolved
+quality findings or high method sensitivity withhold the affected savings headline.
+Diagnostic differences remain available for investigation in clearly named fields.
+Future baseline totals are also withheld when baseline quality or validation fails;
+plotted predictions from withheld models are diagnostic only. Existing v0.4 results
+must be rerun to receive these checks; summarizing old artifacts cannot add them.
+
+Review these files before interpreting a result:
+
+| File | Purpose |
+| --- | --- |
+| `meter-consumption.csv` | Source consumption by meter, independent of baseline fitting; available-days and complete-period totals remain separate |
+| `data-quality-events.csv` / `.json` | Flagged dates, reasons and anchored event IDs |
+| `quality-review-summary.json` | Resolved, unresolved and stale/unmatched review IDs |
+| `quality-reviewed-meter.csv` | Analysis copy; corrections/exclusions preserve original kWh |
+| `meter-.../baseline-comparison.json` | Candidate forecasts and method sensitivity |
+| `meter-.../baseline-model.json` | Selected model, chronological validation and review gates |
+| `response/point-coverage.csv` | BMS point cadence, gaps and usable samples |
+| `meter-summary.csv` | Released comparisons, diagnostic differences and reasons for withholding |
+
+`merged-meter.csv` remains the merged original input. No automatic deletion,
+interpolation, clipping or replacement of unreviewed readings is performed. Only a
+documented review can exclude/correct an anchored event in the analysis copy.
+
+To record a decision, copy the event ID into a private JSON ledger such as
+`local/quality-reviews.json`:
+
+```json
+[
+  {
+    "event_id": "COPY_EXACT_EVENT_ID_FROM_REPORT",
+    "reviewed": true,
+    "reviewer": "Reviewer name",
+    "reference": "CARMA support ticket or other documented evidence",
+    "decision": "accept"
+  }
+]
+```
+
+Use `accept` only after confirming the reading is valid; `exclude` for a confirmed
+unusable reading; or `correct` plus `corrected_kwh` for a documented single-day
+correction. An exclusion leaves a missing period; it never creates zero consumption.
+Add `--quality-reviews local/quality-reviews.json` to the analysis command and use a
+new output directory. Event IDs include raw dates/values; stale decisions cannot
+silently apply to revised source readings. Re-exporting corrected data is preferable
+to manual corrections. Do not approve flags merely to obtain plausible savings.
+
+A quality-only preparation run is available with `--prepare-only`. For revised
+CARMA overlaps, first inspect the conflict; use `--overlap-policy prefer-last` only
+when intentionally accepting the newer source revision. The merge audit records it.
+
+This implementation follows the robust-loss and chronological-validation principles
+in the [Huber regression documentation](https://scikit-learn.org/stable/modules/linear_model.html#huber-regression)
+and [time-series validation documentation](https://scikit-learn.org/stable/modules/cross_validation.html#time-series-split).
+The implementation uses NumPy; scikit-learn is not required.
 
 ## Combine the earlier exports with a new download
 
@@ -334,20 +426,16 @@ has not been verified by this release; provision storage/permissions and test it
 
 ## Verification and known limits
 
-The previous 0.3.3 release passed 59 offline tests and built as a Python wheel.
-Version 0.4.0 adds overlap reconciliation and a separately validated BMS Ridge response model.
-It passed 67 offline tests, including an end-to-end combined-export test for all 67
-requested reporting days, and built successfully as a Python wheel. The existing BMS
-snapshot alone does not provide enough eligible days for this response model; fresh
-history must pass the same coverage and validation checks. No new real-data savings
-result is claimed before that download is provided.
-The configured GitHub Actions matrix has not yet run in your repository.
+Version 0.5.0 adds robust calendar baselines, common chronological validation,
+reviewable meter-quality screening and withheld headlines for unreliable results.
+All 78 offline tests passed locally. Tests include raw-value preservation, anchored review decisions, model selection
+without holdout leakage, missing-day handling and end-to-end exports. A local Python
+wheel is built for release. Docker and live Runpod infrastructure require site testing.
+The existing BMS snapshot still needs sufficient synchronized, coverage-screened days;
+the package does not lower validation requirements to force a response estimate.
 
-The previous real-data check discovered 247 meters: 209 produced comparison reports,
-38 were blocked, and 159 fitted meters triggered the held-out error review gate.
-The three-month check yielded complete forecasts for 208 meters. These are snapshot
-results, not guaranteed counts for new inputs and not evidence of verified savings.
-Calendar-only forecasting does not model seasonal heating/cooling demand; a three-month
+Annual calendar terms approximate recurring seasonal patterns but do not model actual
+weather or changes in heating/cooling demand; a three-month
 winter forecast can be unreliable even when a numerical validation screen passes.
 
 GitHub Actions runs the offline tests on Python 3.11 and 3.12 after push. No private

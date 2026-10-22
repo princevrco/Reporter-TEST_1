@@ -48,3 +48,15 @@ def test_response_future_requires_later_date_and_checks_support_and_hash():
 def test_insufficient_days_do_not_produce_energy_estimates():
     m,f,c=synthetic()
     with pytest.raises(DataError,match='training days'):fit(m.iloc[:25],f,c,'UTC')
+
+
+def test_proposed_aliases_report_sampling_and_keep_semantics_unverified():
+    f=pd.DataFrame({'timestamp':pd.date_range('2026-08-15',periods=4,freq='15min',tz='UTC'),
+        'RTU_SupplyFan':[1,1,0,0],'RTU_CoolSetpointUsed':[24,24,25,25],'RTU_ZoneHeatSetpoint':[20,20,20,20]})
+    cfg=discover(f)
+    assert cfg['groups']['RTU']['fan']=='RTU_SupplyFan'
+    assert cfg['groups']['RTU']['cool_setpoint']=='RTU_CoolSetpointUsed'
+    assert cfg['semantics_verified'] is False
+    _,audit=features(f,cfg,'UTC')
+    assert audit['signal_audit']['RTU_SupplyFan']['median_sampling_minutes']==15
+    assert audit['signal_audit']['RTU_SupplyFan']['maximum_gap_minutes']==15

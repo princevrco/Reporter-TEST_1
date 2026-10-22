@@ -18,6 +18,6 @@
     72,
     73
   ],
-  "implemented": "OLS steady-state linear and heating/cooling change-point regression plus calendar/exogenous covariates, reporting-condition adjustment and separately calibrated post regression",
+  "implemented": "OLS and Huber daily calendar regression, optional annual calendar terms, chronological selection and held-out validation, explicit quality review, model sensitivity; advanced CLI weather change-point models and separate BMS response regression",
   "excluded": "Not an implementation of every protocol model or automatic standards certification"
 }

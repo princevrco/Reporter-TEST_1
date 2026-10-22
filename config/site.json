@@ -80,5 +80,32 @@
     }
   },
   "notes": "User confirmed on October 21, 2026: all assets under optimized control from August 15. Baseline remains conservatively before July 24 to exclude uncertain commissioning. Meter boundary, timezone convention, BMS semantics and non-control changes remain unverified.",
-  "baseline_end_exclusive": "2026-07-24T00:00:00-04:00"
+  "baseline_end_exclusive": "2026-07-24T00:00:00-04:00",
+  "baseline_options": {
+    "enabled": true,
+    "windows_days": [
+      null,
+      365,
+      180
+    ],
+    "estimators": [
+      "ols",
+      "huber",
+      "weekday_median"
+    ],
+    "minimum_training_days": 60,
+    "holdout_days": 56,
+    "fold_days": 28,
+    "bootstrap_repeats": 64,
+    "sensitivity_limit_pct": 10,
+    "annual_calendar_candidates": true
+  },
+  "data_quality": {
+    "enabled": true,
+    "spike_factor": 8,
+    "spike_mad": 12,
+    "zero_run_days": 7,
+    "shift_window_days": 28,
+    "shift_ratio": 1.75
+  }
 }

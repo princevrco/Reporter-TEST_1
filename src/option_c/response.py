@@ -12,9 +12,12 @@ SUFFIXES={'cool_stage1':'_Cool1','cool_stage2':'_Cool2','heat_stage1':'_Heat1',
 
 def discover(frame):
     groups={}
+    aliases={'fan':('_FanEnable','_SupplyFan'),'cool_setpoint':('_CoolSetpointU_AV','_CoolSetpointUsed','_ZoneCoolSetpoint'),
+             'heat_setpoint':('_HeatSetpointU_AV','_HeatSetpointUsed','_ZoneHeatSetpoint')}
     for col in frame:
         for role,suffix in SUFFIXES.items():
-            if col.endswith(suffix):groups.setdefault(col[:-len(suffix)],{})[role]=col
+            for accepted in aliases.get(role,(suffix,)):
+                if col.endswith(accepted):groups.setdefault(col[:-len(accepted)],{}).setdefault(role,col)
     return {'schema':'option_c.response_config.v1','semantics_verified':False,'groups':groups,
             'bin_minutes':15,'maximum_age_minutes':15,'minimum_daily_coverage':.9,
             'minimum_training_days':40,'minimum_holdout_days':8,'maximum_features':24,
@@ -49,7 +52,11 @@ def features(frame,cfg,timezone):
                 aligned=pd.merge_asof(pd.DataFrame({'timestamp':grid}),src,on='timestamp',direction='backward',tolerance=pd.Timedelta(minutes=age))
                 sample=pd.Series(aligned.value.to_numpy(),index=grid)
             signals[(group,role)]=sample
-            audit[col]={'observed_rows':int(f[col].notna().sum()),'rejected_rows':int((f[col].notna()&~good).sum()),'populated_bins':int(sample.notna().sum())}
+            observed=f.loc[f[col].notna(),'timestamp'];spacing=observed.diff().dt.total_seconds().div(60).dropna()
+            audit[col]={'observed_rows':int(f[col].notna().sum()),'rejected_rows':int((f[col].notna()&~good).sum()),'populated_bins':int(sample.notna().sum()),
+                'median_sampling_minutes':float(spacing.median()) if len(spacing) else None,
+                'p95_sampling_minutes':float(spacing.quantile(.95)) if len(spacing) else None,
+                'maximum_gap_minutes':float(spacing.max()) if len(spacing) else None}
     signals_frame={group+'::'+role:series for (group,role),series in signals.items()}
     for role in SUFFIXES:
         cols=[s for (group,r),s in signals.items() if r==role]
@@ -145,6 +152,7 @@ def fit(meter,feature_frame,cfg,timezone):
     validation=metrics(f.energy_kwh.to_numpy()[split:],held);gates=['electrical_boundary_unverified','statistical_response_not_causal_savings','weather_not_modeled','selected_bms_features_do_not_prove_all_asset_effects',
         'heldout_consumption_uses_observed_bms_not_a_free_running_operating_forecast']
     if cfg.get('semantics_verified') is not True:gates.append('bms_signal_semantics_unverified')
+    if 'quality_review_required' in f and f.quality_review_required.isin([True,1,'True','true','1']).any():gates.append('meter_quality_review_required')
     if validation['cvrmse_pct']>20 or abs(validation['nmbe_pct'])>5:gates.append('heldout_model_error_requires_review')
     artifact={'schema':'option_c.ridge_response.v1','features':candidates,'parameters':solve(x,y,alpha),
         'alpha':alpha,'feature_min':x.min(axis=0).tolist(),'feature_max':x.max(axis=0).tolist(),

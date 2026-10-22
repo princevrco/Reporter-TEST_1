@@ -48,4 +48,7 @@ $('table').innerHTML='';for(const r of s.slice(0,200)){const tr=document.createE
         extra+='</tbody></table><p class="muted">Shared equipment and co-moving zones may only have group associations. Missing values are unavailable, not zero. These percentages do not establish zone-level savings. Date filters above affect the energy view only.</p></div>'
         html=html.replace('<p class="footer">',extra+'<p class="footer">')
         html=html.replace('const R=__OPTION_C_REPORT_DATA__;','const R='+data+';')
+    if result.get('release_status')=='withheld_requires_review':
+        html=html.replace('Energy savings analysis','Energy comparison — withheld')
+        html=html.replace('<p class="footer">','<div class="card gates"><strong>Results withheld pending review</strong><p>Unresolved data or model findings prevent releasing savings. Diagnostic differences remain in JSON/CSV for investigation and must not be quoted as achieved savings.</p></div><p class="footer">')
     (folder/'report.html').write_text(html,encoding='utf-8')
