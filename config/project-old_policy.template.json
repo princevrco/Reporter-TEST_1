@@ -1,0 +1,17 @@
+{
+  "kind": "old_policy",
+  "reference": "REPLACE with documented old_policy policy",
+  "reviewed": false,
+  "assets": {
+    "REPLACE_ASSET": {
+      "weekdays": [],
+      "occupied_start": null,
+      "occupied_end": null,
+      "occupied_cooling_c": null,
+      "unoccupied_cooling_c": null,
+      "occupied_heating_c": null,
+      "unoccupied_heating_c": null,
+      "control_margin_c": null
+    }
+  }
+}

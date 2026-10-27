@@ -1,0 +1,24 @@
+{
+  "site_id": "promenade",
+  "request_id": "project_001",
+  "action": "run_project",
+  "files": {
+    "meter": [
+      "alectra.xlsx"
+    ],
+    "bms": [
+      "bms.csv"
+    ],
+    "weather": "weather_daily.csv",
+    "config": "site.json",
+    "old_policy": "old_policy.json",
+    "optimized_policy": "optimized_policy.json"
+  },
+  "meter_kind": "utility",
+  "start": "2026-08-15",
+  "end": "2026-10-21",
+  "forecast_start": "2026-10-26",
+  "forecast_end": "2027-01-26",
+  "weather_scenario": "climatology",
+  "rate": 0.12
+}

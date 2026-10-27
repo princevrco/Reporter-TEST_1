@@ -39,6 +39,7 @@ def main():
     p.add_argument('--start',default='2026-08-15')
     p.add_argument('--end',default='2026-10-21',help='Exclusive local date')
     p.add_argument('--output',type=Path,default=Path('results/promenade-test'))
+    p.add_argument('--weather',type=Path,help='External daily Celsius weather CSV, including baseline/reporting dates')
     p.add_argument('--quality-reviews',type=Path,help='Documented meter-quality review ledger')
     p.add_argument('--rate',type=float,default=.12,help='Assumed CAD per kWh')
     p.add_argument('--forecast-start');p.add_argument('--forecast-end',help='Exclusive local date')
@@ -48,7 +49,7 @@ def main():
         if not file.exists():p.error('Missing input: '+str(file))
     if args.output.exists():p.error('Output already exists; choose a new --output directory')
     cfg=load(args.config)
-    print('Engineering comparison: confirmed August 15 control start; calendar-only baseline.',flush=True)
+    print('Engineering comparison: confirmed August 15 control start; '+('external-weather candidate baseline.' if args.weather else 'calendar-only baseline.'),flush=True)
     print('All source meters analyzed separately. Zone effects unavailable. Flat-rate CAD comparison will be generated.',flush=True)
     with tempfile.TemporaryDirectory(prefix='promenade-meter-') as temp:
         meter=args.meter
@@ -56,7 +57,7 @@ def main():
             meter=Path(temp);extract_meter(args.meter,meter)
             print('Meter archive extracted. Validating daily files and fitting every meter; this can take several minutes.',flush=True)
         summary=run(meter,args.bms,cfg,args.start,args.end,args.output,kind='carma',carma_daily_kwh=True,
-                    quality_reviews=load(args.quality_reviews) if args.quality_reviews else None,
+                    quality_reviews=load(args.quality_reviews) if args.quality_reviews else None,weather_path=args.weather,
                     progress=lambda entry,index,total:print(f"[{index}/{total}] {entry['meter_id']}: {entry['status']}",flush=True))
     entries=summary['meters']
     import pandas as pd

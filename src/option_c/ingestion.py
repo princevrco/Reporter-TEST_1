@@ -26,15 +26,21 @@ def extract_meter(archive,destination):
             with z.open(info) as src,target.open('wb') as dst:shutil.copyfileobj(src,dst)
 
 
-def merge_meters(paths,policy='error'):
+def merge_meters(paths,policy='error',kind='carma'):
     if policy not in ('error','prefer-last'):raise DataError('Unknown overlap policy')
     parts=[];sources=[]
     for i,p in enumerate(map(Path,paths)):
-        with TemporaryDirectory(prefix='meter-input-') as temp:
-            folder=p
-            if p.suffix.lower()=='.zip':
-                folder=Path(temp);extract_meter(p,folder)
-            f,a=source(folder,True)
+        chosen=('utility' if p.suffix.lower() in ('.xlsx','.xls') else 'carma') if kind=='auto' else kind
+        if chosen=='carma':
+            with TemporaryDirectory(prefix='meter-input-') as temp:
+                folder=p
+                if p.suffix.lower()=='.zip':
+                    folder=Path(temp);extract_meter(p,folder)
+                f,a=source(folder,True)
+        else:
+            from .importers import prepare
+            f=prepare(p,kind=chosen)
+            a=f.attrs.get('source_audit',{'kind':chosen,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
         sources.append({'input_order':i,'name':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else a['sha256'],'validation':a})
         f=f.copy();f['_input_order']=i;parts.append(f)
     if not parts:raise DataError('No meter exports supplied')

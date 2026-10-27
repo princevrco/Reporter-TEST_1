@@ -11,14 +11,15 @@ from .regression import metrics
 from .response import features as bms_features, solve, estimate
 
 
-def prepare(raw, response_config, settings, timezone, reporting_end):
+def prepare(raw, response_config, settings, timezone, reporting_end,weather=None):
     """Choose a fixed asset cohort from past BMS availability, without meter targets."""
     settings=dict(settings)
     minimum=max(28,int(settings.get('minimum_training_days',28)))
     holdout_days=max(14,int(settings.get('holdout_calendar_days',14)))
     cutoff=str((pd.Timestamp(reporting_end)-pd.DateOffset(days=holdout_days)).date())
     cfg={**response_config,'maximum_age_minutes':float(settings.get('maximum_age_minutes',30))}
-    daily,audit=bms_features(raw,cfg,timezone)
+    if weather is not None:cfg['weather_columns']=['outdoor_temperature_c']
+    daily,audit=bms_features(raw,cfg,timezone,weather)
     daily=daily[daily.date<reporting_end].copy()
     past=daily[daily.date<cutoff]
     groups=[]
@@ -67,6 +68,9 @@ def aggregate(daily,cohort):
         result[role]=block.mean(axis=1).where(block.notna().all(axis=1))
         definition[role]={'columns':cols,'aggregation':'equal-weight fixed-cohort mean; every contributor required'}
     local=pd.to_datetime(result.date)
+    if 'outdoor_temperature_c' in daily:
+        result['outdoor_temperature_c']=daily.outdoor_temperature_c
+        definition['outdoor_temperature_c']={'aggregation':'External site-local daily mean outdoor temperature in Celsius'}
     result['calendar_weekend']=(local.dt.dayofweek>=5).astype(float)
     length=np.where(local.dt.is_leap_year,366.,365.)
     phase=2*np.pi*(local.dt.dayofyear.to_numpy()-1)/length
@@ -95,6 +99,8 @@ def fit(meter,feature_frame,meta,reporting_start,reporting_end,rate=.12):
     f=meter.merge(feature_frame,on='date',validate='one_to_one').sort_values('date')
     if 'quality' in f:f=f[f.quality.eq('good')]
     physical=['cool_setpoint','temperature','cooling_demand','setpoint_change']
+    if meta.get('config',{}).get('weather_columns') and 'outdoor_temperature_c' not in f:raise DataError('External weather setpoint features missing')
+    if 'outdoor_temperature_c' in f:physical.append('outdoor_temperature_c')
     physical += [c for c in ('heat_setpoint','heating_demand','heat_setpoint_change') if c in f]
     f=f[f[physical].notna().all(axis=1)&pd.to_numeric(f.energy_kwh,errors='coerce').notna()]
     f=f[f.date<reporting_end].reset_index(drop=True)
@@ -102,7 +108,7 @@ def fit(meter,feature_frame,meta,reporting_start,reporting_end,rate=.12):
     training=f[f.date<cutoff];test=f[f.date>=cutoff]
     if len(training)<minimum or len(test)<holdout:
         raise DataError(f'Setpoint model needs {minimum} covered training days and {holdout} later test days; found {len(training)} and {len(test)}')
-    calendar=[c for c in ('calendar_weekend',) if training[c].std()>1e-8]
+    calendar=[c for c in ('calendar_weekend','outdoor_temperature_c') if c in training and training[c].std()>1e-8]
     bundles={'setpoint_levels':['cool_setpoint','temperature'],
              'thermal_demand':['cooling_demand','temperature'],
              'setpoint_changes':['cool_setpoint','setpoint_change','temperature']}
@@ -160,6 +166,7 @@ def fit(meter,feature_frame,meta,reporting_start,reporting_end,rate=.12):
     outside=np.any((test[cols].to_numpy()<low-1e-8)|(test[cols].to_numpy()>high+1e-8),axis=1)
     gates=['electrical_boundary_unverified','conditional_temperature_not_a_thermal_policy_simulator',
            'fixed_asset_cohort_not_all_asset_causal_effect','historical_development_backtest_not_prospective_validation']
+    if 'outdoor_temperature_c' in f:gates.append('external_weather_source_requires_review')
     if not meta['semantics_verified']:gates.append('bms_signal_semantics_unverified')
     if (p<0).any() or not np.isfinite(p).all():gates.append('unphysical_response_prediction')
     if validation['cvrmse_pct']>20 or abs(validation['nmbe_pct'])>5:gates.append('heldout_model_error_requires_review')
@@ -206,7 +213,7 @@ def fit(meter,feature_frame,meta,reporting_start,reporting_end,rate=.12):
     return model,summary,rows,heldout
 
 
-def predict(model,raw_bms,start,end,overrides=None):
+def predict(model,raw_bms,start,end,overrides=None,weather=None):
     """Estimate a supplied operating trajectory, optionally overriding setpoints.
 
     Overrides are explicit {group: cooling_c} or {group: {cooling: c, heating: c}}. Unmeasured source
@@ -233,7 +240,7 @@ def predict(model,raw_bms,start,end,overrides=None):
             column=cfg['groups'][group][role]
             if column not in raw:raise DataError('Override input signal missing: '+column)
             raw.loc[raw[column].notna(),column]=number
-    daily,_=bms_features(raw,cfg,meta['timezone']);f,_=aggregate(daily,meta['cohort'])
+    daily,_=bms_features(raw,cfg,meta['timezone'],weather);f,_=aggregate(daily,meta['cohort'])
     for role in ('heat_setpoint','heating_demand','heat_setpoint_change'):
         if role in model['features'] and role in meta['definition']:
             cols=meta['definition'][role]['columns']

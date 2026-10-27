@@ -11,11 +11,10 @@ def assess(part,cfg,start,end,reviews=None):
     cutoff=stamp(cfg.get('baseline_end_exclusive',cfg['intervention_timestamp']),cfg['timezone']).tz_convert(cfg['timezone']).date().isoformat()
     baseline=f[(f.date<cutoff)&f.energy_kwh.notna()]
     values=baseline.energy_kwh.to_numpy(float)
-    if not len(values):return f,[],{'unresolved_baseline_events':0,'unresolved_reporting_events':0}
-    median=float(np.median(values));positive=values[values>0]
+    median=float(np.median(values)) if len(values) else 0.;positive=values[values>0]
     reference=median if median>0 else float(np.median(positive)) if len(positive) else 0.
-    scale=float(1.4826*np.median(np.abs(values-median)))
-    threshold=max(1.,reference*float(options.get('spike_factor',8)),median+float(options.get('spike_mad',12))*scale)
+    scale=float(1.4826*np.median(np.abs(values-median))) if len(values) else 0.
+    threshold=max(1.,reference*float(options.get('spike_factor',8)),median+float(options.get('spike_mad',12))*scale) if len(values) else float('inf')
     events=[]
     def add(code,indexes,phase,detail):
         if not len(indexes):return
@@ -27,6 +26,11 @@ def assess(part,cfg,start,end,reviews=None):
             'days':len(dates),'energy_kwh':float(rows.energy_kwh.sum()),'detail':detail,
             'review_status':'unreviewed','decision':None,'reference':None,'reviewer':None,'_indexes':list(indexes)})
     scope=((f.date<cutoff)|((f.date>=start)&(f.date<end)))
+    if 'source_review_required' in f:
+        flagged=f.source_review_required.astype(str).str.lower().isin(['true','1','yes'])
+        for i in f.index[scope&flagged&f.energy_kwh.notna()]:
+            add('source_reading_review',[i],'baseline' if f.loc[i,'date']<cutoff else 'reporting',
+                'Source workbook review: '+str(f.loc[i].get('source_flags','')))
     for i in f.index[scope&f.energy_kwh.gt(threshold)]:
         add('extreme_daily_spike',[i],'baseline' if f.loc[i,'date']<cutoff else 'reporting',
             f'Baseline median={median:.6g} kWh; engineering screen threshold={threshold:.6g} kWh. Not proof of invalid data.')
@@ -103,7 +107,7 @@ def assess(part,cfg,start,end,reviews=None):
     stats={'unresolved_baseline_events':sum(e['phase']=='baseline' and e['review_status']=='unreviewed' for e in events),
            'unresolved_reporting_events':sum(e['phase']=='reporting' and e['review_status']=='unreviewed' for e in events),
            'reviewed_events':sum(e['review_status']=='reviewed' for e in events),'screen_reference_median_kwh':median,
-           'screen_spike_threshold_kwh':threshold,'note':'Engineering screens are not proof of error; no unreviewed deletion, replacement or winsorization.'}
+           'screen_spike_threshold_kwh':threshold if np.isfinite(threshold) else None,'note':'Engineering screens are not proof of error; no unreviewed deletion, replacement or winsorization.'}
     return f,[{k:v for k,v in e.items() if k!='_indexes'} for e in events],stats
 
 

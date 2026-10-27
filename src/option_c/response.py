@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from .data import DataError,digest,records
 from .regression import metrics
+from .weather import features as weather_features
 
 
 SUFFIXES={'cool_stage1':'_Cool1','cool_stage2':'_Cool2','heat_stage1':'_Heat1',
@@ -25,7 +26,7 @@ def discover(frame):
             'note':'Proposed column bindings from names only; inspect encodings, shared equipment and load representativeness. Features are uncertain operation proxies until verified.'}
 
 
-def features(frame,cfg,timezone):
+def features(frame,cfg,timezone,weather=None):
     groups=cfg.get('groups',{})
     if not groups:raise DataError('No mapped BMS groups; supply response config or recognizable BMS columns')
     minutes=int(cfg.get('bin_minutes',15));age=float(cfg.get('maximum_age_minutes',15));coverage=float(cfg.get('minimum_daily_coverage',.9))
@@ -85,7 +86,8 @@ def features(frame,cfg,timezone):
     daily['hours']=[(t+pd.DateOffset(days=1)-t).total_seconds()/3600 for t in daily.index]
     daily['date']=daily.index.date.astype(str)
     for day in range(1,7):daily['calendar_weekday_'+str(day)]=(daily.index.dayofweek==day).astype(float)
-    return daily.reset_index(drop=True),{'signal_audit':audit,'config_sha256':digest(cfg),
+    daily=weather_features(daily.reset_index(drop=True),weather,bool(cfg.get('weather_columns')))
+    return daily,{'external_weather_supplied':weather is not None,'signal_audit':audit,'config_sha256':digest(cfg),
         'semantics_verified':cfg.get('semantics_verified',False),'equipment_groups':list(groups),
         'method':'Past-only sample-and-hold at bounded age, daily equal-bin signal means; one-day lags require prior calendar day. Not measured runtime or electrical energy.',
         'coverage_rule':'All mapped contributors to each feature required; no missing asset assumed OFF',
@@ -107,6 +109,10 @@ def estimate(params,x):
 def fit(meter,feature_frame,cfg,timezone):
     f=meter.merge(feature_frame,on='date',validate='one_to_one').sort_values('date').reset_index(drop=True)
     cols=[c for c in f if c.startswith('bms_')]
+    weather_cols=list(cfg.get('weather_columns',['outdoor_temperature_c'] if 'outdoor_temperature_c' in f else []))
+    if len(set(weather_cols))!=len(weather_cols) or any(c!='outdoor_temperature_c' for c in weather_cols):raise DataError('Unsupported external weather response columns')
+    if any(c not in f for c in weather_cols):raise DataError('External weather response features missing')
+    if weather_cols and not np.isfinite(f[weather_cols].to_numpy(float)).all():raise DataError('External weather response values missing')
     f=f.loc[pd.to_numeric(f.energy_kwh,errors='coerce').notna()].copy()
     if 'quality' in f:f=f[f.quality=='good'].copy()
     if not cols:raise DataError('No BMS feature columns')
@@ -131,6 +137,7 @@ def fit(meter,feature_frame,cfg,timezone):
     # Recompute feature variation from the actual outer training period. Drop constants.
     candidates=[c for c in candidates if f.iloc[:split][c].std()>1e-8]
     if not candidates:raise DataError('No BMS variation in the actual training period')
+    candidates += [c for c in weather_cols if f.iloc[:split][c].std()>1e-8]
     candidates += [c for c in f if c.startswith('calendar_weekday_') and f.iloc[:split][c].std()>1e-8]
     x=f[candidates].to_numpy(float);hours=f.hours.to_numpy(float);y=f.energy_kwh.to_numpy(float)/hours
     folds=[]
@@ -149,7 +156,7 @@ def fit(meter,feature_frame,cfg,timezone):
         scores.append((float(np.mean(losses)),alpha))
     alpha=min(scores)[1];held=estimate(solve(x[:split],y[:split],alpha),x[split:])*hours[split:]
     if not np.isfinite(held).all() or (held<0).any():raise DataError('Unphysical held-out BMS energy prediction')
-    validation=metrics(f.energy_kwh.to_numpy()[split:],held);gates=['electrical_boundary_unverified','statistical_response_not_causal_savings','weather_not_modeled','selected_bms_features_do_not_prove_all_asset_effects',
+    validation=metrics(f.energy_kwh.to_numpy()[split:],held);gates=['electrical_boundary_unverified','statistical_response_not_causal_savings',*(['external_weather_source_requires_review'] if weather_cols else ['weather_not_modeled']),'selected_bms_features_do_not_prove_all_asset_effects',
         'heldout_consumption_uses_observed_bms_not_a_free_running_operating_forecast']
     if cfg.get('semantics_verified') is not True:gates.append('bms_signal_semantics_unverified')
     if 'quality_review_required' in f and f.quality_review_required.isin([True,1,'True','true','1']).any():gates.append('meter_quality_review_required')
@@ -173,6 +180,7 @@ def predict(model,feature_frame,cfg):
     if digest({k:v for k,v in model.items() if k!='model_id'})!=model.get('model_id'):raise DataError('BMS response model checksum mismatch')
     if digest(cfg)!=model['config_sha256']:raise DataError('BMS response configuration changed')
     f=feature_frame.copy();f=f[f.date>=model['fit_end_exclusive']]
+    if any(c not in f for c in model['features']):raise DataError('Missing response predictors, including any required external weather')
     x=f[model['features']].to_numpy(float);p=estimate(model['parameters'],x)*f.hours.to_numpy(float)
     outside=np.any((x<np.array(model['feature_min']))|(x>np.array(model['feature_max'])),axis=1)
     return [{'date':day,'bms_estimated_kwh':float(v) if np.isfinite(v) and v>=0 else None,

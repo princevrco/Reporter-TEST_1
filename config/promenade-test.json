@@ -103,7 +103,8 @@
       1,
       2,
       3
-    ]
+    ],
+    "weather_reference_c": 18.3
   },
   "data_quality": {
     "enabled": true,

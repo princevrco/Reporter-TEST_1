@@ -30,10 +30,12 @@ def coefficients(x,y,estimator):
 
 def fit(rows,cfg):
     check_cfg(cfg)
-    if cfg['resolution']!='daily' or cfg.get('independent_variables'):raise DataError('Resilient batch baseline supports daily calendar models only; use advanced CLI for other regressors')
+    if cfg['resolution']!='daily' or cfg.get('independent_variables'):raise DataError('Resilient batch baseline supports daily calendar/weather models only')
     f=frame(rows,cfg,energy=True);cutoff=stamp(cfg['intervention_timestamp'],cfg['timezone'])
     if (f.period_end>cutoff).any():raise DataError('Baseline includes controlled periods')
     f=f[f.energy_kwh.notna()].reset_index(drop=True)
+    weather_enabled=bool(cfg.get('external_weather_enabled',False))
+    if weather_enabled and not np.isfinite(f.temperature_c.to_numpy(float)).all():raise DataError('External weather missing in baseline calibration')
     opt=cfg.get('baseline_options',{});minimum=int(opt.get('minimum_training_days',60));holdout_days=int(opt.get('holdout_days',56));fold_days=int(opt.get('fold_days',28))
     if minimum<35 or holdout_days<14 or fold_days<7:raise DataError('Baseline validation settings below supported floors')
     if len(f)<cfg.get('minimum_baseline_periods',90):raise DataError('Insufficient valid baseline periods')
@@ -58,7 +60,10 @@ def fit(rows,cfg):
         if any(t['kind']=='sin_year' for t in model_terms):
             days=len(pd.date_range(data.timestamp.min().tz_convert(cfg['timezone']),data.period_end.max().tz_convert(cfg['timezone']),freq='D',inclusive='left'))
             if days<365 or len(data)/days<.9:raise DataError('Annual calendar terms need a full year with 90% coverage before every validation origin')
-        return coefficients(matrix(data,model_terms,cfg),(data.energy_kwh/data.hours).to_numpy(float),estimator)
+        coef,active=coefficients(matrix(data,model_terms,cfg),(data.energy_kwh/data.hours).to_numpy(float),estimator)
+        if any(coef[i]<-1e-8 for i,t in enumerate(model_terms) if t['kind'] in ('hdd','cdd')):
+            raise DataError('Negative heating/cooling weather slope rejected')
+        return coef,active
     def predict(data,coef,model_terms):
         p=matrix(data,model_terms,cfg)@coef*data.hours.to_numpy()
         if not np.isfinite(p).all() or (p<0).any():raise DataError('Unphysical candidate baseline prediction')
@@ -69,10 +74,20 @@ def fit(rows,cfg):
         harmonics=opt.get('annual_harmonics',[1])
         if not harmonics or any(type(h) is not int or not 1<=h<=3 for h in harmonics):raise DataError('Use annual harmonic orders from 1 to 3')
         specs += [(d,e,h) for d in windows for e in estimators for h in harmonics if e!='weekday_median' and (d is None or d>=365)]
-    for days,estimator,annual in specs:
-        model_terms=terms+[{'kind':kind,'harmonic':h} for h in range(1,annual+1) for kind in ('sin_year','cos_year')]
+    specs=[(*spec,'calendar') for spec in specs]
+    reference=float(opt.get('weather_reference_c',18.3))
+    if not np.isfinite(reference) or not -20<=reference<=40:raise DataError('Invalid weather reference temperature')
+    weather_terms={'calendar':[], 'linear_temperature':[{'kind':'temperature'}],
+        'heating':[{'kind':'hdd','base_c':reference}], 'cooling':[{'kind':'cdd','base_c':reference}],
+        'heating_cooling':[{'kind':'hdd','base_c':reference},{'kind':'cdd','base_c':reference}]}
+    if weather_enabled:
+        specs += [(d,e,a,w) for d,e,a,_ in list(specs) if e!='weekday_median' and a<=1
+                  for w in ('linear_temperature','heating','cooling','heating_cooling')]
+    for days,estimator,annual,weather_family in specs:
+        model_terms=terms+weather_terms[weather_family]+[{'kind':kind,'harmonic':h} for h in range(1,annual+1) for kind in ('sin_year','cos_year')]
         suffix='' if not annual else '_annual' if annual==1 else '_annual'+str(annual)
         name=estimator+'_'+('all' if days is None else str(days))+suffix
+        if weather_family!='calendar':name+='_'+weather_family
         entry={'name':name,'estimator':estimator,'window_days':days,'status':'unavailable'}
         try:
             losses=[]
@@ -96,7 +111,10 @@ def fit(rows,cfg):
     if not available:raise DataError('No baseline candidate passed chronological fitting checks')
     # Selection is fixed before consulting the outer validation errors.
     best=min(available,key=lambda s:(s['cv_rmse_kwh'],s['name']))
-    final,coef,active,terms=finals[best['name']];gates=['weather_not_modeled']
+    final,coef,active,terms=finals[best['name']];gates=[]
+    weather_selected=any(t['kind'] in ('temperature','hdd','cdd') for t in terms)
+    if not weather_selected:gates.append('external_weather_not_selected' if weather_enabled else 'weather_not_modeled')
+    if weather_enabled:gates.append('external_weather_source_requires_review')
     for key in ('meter_boundary_verified','timestamps_verified','intervention_confirmed','independent_variables_verified','static_factors_reviewed','mv_plan_approved'):
         if cfg.get('review',{}).get(key) is not True:gates.append(key+'_required')
     if not best['validation_passed']:gates.append('heldout_model_error_requires_review')
@@ -128,7 +146,7 @@ def fit(rows,cfg):
         'validation_scope':'Same final held-out calendar dates for every estimator/lookback; rolling inner folds alone select the model. Final refit uses the chosen lookback.',
         'holdout_start':outer.isoformat(),'holdout_end_exclusive':end.isoformat(),
         'source_protocol':'Engineering implementation inspired by IPMVP Option C; not automatic protocol certification',
-        'release_checks_enabled':True,
+        'release_checks_enabled':True,'external_weather_supplied':weather_enabled,'external_weather_selected':weather_selected,
         'uncertainty_centering':'centered_bootstrap_and_holdout_residuals',
         'development_note':'Historical development backtest; future independent validation remains required. No reporting energy enters baseline selection.'}
     artifact['model_id']=digest(artifact)

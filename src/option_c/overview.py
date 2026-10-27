@@ -10,6 +10,7 @@ from .workflow import forecast
 from .reporting import write
 from .comparisons import compare
 from .control_forecast import fit_predict as continued_forecast
+from .weather import read as read_weather, join as join_weather
 
 
 def total(results,selected,rate):
@@ -33,7 +34,7 @@ def total(results,selected,rate):
             'note':'Common observed/eligible periods only; operator must verify these boundaries do not overlap. Signed differences, not verified causal savings.'}
 
 
-def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=None):
+def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=None,weather=None):
     folder=Path(folder);summary=load(folder/'summary.json');results={};rows=[];views=[]
     if not np.isfinite(rate) or rate<0:raise DataError('Rate must be finite and nonnegative')
     first=next((e for e in summary['meters'] if (folder/e['folder']/'baseline-model.json').exists()),None)
@@ -43,6 +44,8 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
     end=forecast_end or str((pd.Timestamp(start)+pd.DateOffset(months=3)).date())
     a,b=stamp(start,timezone,True),stamp(end,timezone,True)
     if b<=a or (b-a).total_seconds()>366*86400:raise DataError('Choose a positive forecast period of at most one year')
+    if weather is None and (folder/'forecast-weather.csv').exists():weather,_=read_weather(folder/'forecast-weather.csv',timezone)
+    if weather is None and (folder/'external-weather.csv').exists():weather,_=read_weather(folder/'external-weather.csv',timezone)
     forecasts=[];daily_forecasts=[];comparison_daily=[];controlled_daily=[]
     for entry in summary['meters']:
         meter=entry['meter_id'];base=folder/entry['folder'];row={'meter_id':meter,'status':entry['status'],
@@ -75,6 +78,9 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
                 model=load(base/'baseline-model.json')
                 grid=pd.date_range(a.tz_convert(timezone),b.tz_convert(timezone),freq='D',inclusive='left')
                 conditions=[{'date':t.date().isoformat(),'meter_id':meter} for t in grid]
+                if model['config'].get('external_weather_enabled'):
+                    if weather is None:raise DataError('Future baseline needs explicitly supplied daily weather')
+                    conditions=join_weather(pd.DataFrame(conditions),weather).to_dict('records')
                 f=forecast(model,conditions,start,end);write(f,base/'future-forecast')
                 row.update(forecast_kwh=f['baseline_kwh'],forecast_baseline_cad=f['baseline_kwh']*rate if f['baseline_kwh'] is not None else None,forecast_status=f['status'],diagnostic_forecast_kwh=f.get('diagnostic_baseline_kwh'))
                 forecasts.append({'meter_id':meter,'baseline_kwh':f['baseline_kwh']})
@@ -178,7 +184,7 @@ def build(folder,rate=.12,forecast_start=None,forecast_end=None,total_meters=Non
     candidates=[r for r in rows if r['is_virtual_meter']]
     report={'rate_cad_per_kwh':rate,'currency':'CAD','start':summary['start'],'end_exclusive':summary['end_exclusive'],
             'forecast_start':start,'forecast_end_exclusive':end,'site_total':totals,'meters':rows,'unverified_boundary_candidates':candidates,
-            'scope':'Calendar-only baseline comparison requiring site review. CAD is kWh difference times the user-assumed flat rate; excludes demand, taxes and fixed charges. Baseline forecasts describe no-intervention energy. Any optimized line is conditional on a supplied operating scenario; it is not future realized savings.'}
+            'scope':('Weather/calendar candidate baseline' if summary.get('external_weather_supplied') else 'Calendar-only baseline')+' comparison requiring site review. CAD is kWh difference times the user-assumed flat rate; excludes demand, taxes and fixed charges. Baseline forecasts describe no-intervention energy. Any optimized line is conditional on a supplied operating scenario; it is not future realized savings.'}
     save(folder/'site-total.json',totals)
     def money(value):
         return float((Decimal(str(value))*Decimal(str(rate))).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)) if value is not None else None
