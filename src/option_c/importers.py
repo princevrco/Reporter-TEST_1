@@ -17,8 +17,8 @@ def discover(path,kind,carma_daily_kwh=False):
         if 'meter_code' not in f:raise DataError('Portal CSV requires meter_code')
         return sorted(f.meter_code.dropna().unique().tolist())
     if kind=='utility':
-        sheets=pd.read_excel(path,sheet_name=['Daily kWh','Recent daily'],engine='openpyxl')
-        return sorted({str(c)[:-6] for f in sheets.values() for c in f if str(c).endswith(' (kWh)')})
+        from .utility import read
+        return sorted(read(path).meter_id.unique().tolist())
     if kind=='normalized':
         f=pd.read_csv(path,dtype={'meter_id':str})
         if not {'date','meter_id','energy_kwh'}<=set(f):raise DataError('Normalized CSV requires date, meter_id, energy_kwh')
@@ -27,6 +27,20 @@ def discover(path,kind,carma_daily_kwh=False):
 
 
 def prepare(path,meter_id=None,weather=None,kind='portal',carma_daily_kwh=False):
+    if kind=='utility':
+        from .utility import read
+        result=read(path)
+        audit=result.attrs.get('source_audit')
+        if meter_id is not None:result=result[result.meter_id==meter_id].copy()
+        if result.empty:raise DataError('Selected meter not present in utility workbook')
+        result.attrs['source_audit']=audit
+        if weather:
+            w=pd.read_csv(weather)
+            if 'outdoor_temp_c' in w:w=w.rename(columns={'outdoor_temp_c':'temperature_c'})
+            from .weather import join
+            result=join(result,w)
+            result.attrs['source_audit']=audit
+        return result
     if meter_id is None and kind!='carma':
         ids=discover(path,kind,carma_daily_kwh)
         if not ids:raise DataError('No meters found')
@@ -50,25 +64,6 @@ def prepare(path,meter_id=None,weather=None,kind='portal',carma_daily_kwh=False)
             rows.append({'date':pd.Timestamp(r['date_portal']).date().isoformat(),'meter_id':meter_id,
                          'energy_kwh':float(value) if np.isfinite(value) and not flags else None,
                          'raw_energy_kwh':float(value) if np.isfinite(value) else None,'quality':'excluded' if flags else 'good','source_flags':';'.join(flags)})
-    elif kind=='utility':
-        sheets=pd.read_excel(path,sheet_name=['Daily kWh','Recent daily'],engine='openpyxl')
-        indexed={};column=f'{meter_id} (kWh)'
-        for name,f in sheets.items():
-            if column not in f:continue
-            for r in f.to_dict('records'):
-                try:t=pd.Timestamp(r['Date'])
-                except (ValueError,TypeError):continue
-                if pd.isna(t):continue
-                value=pd.to_numeric(r[column],errors='coerce')
-                if not np.isfinite(value):continue
-                date=t.date().isoformat();note=r.get('Availability / quality note','');flags=[]
-                if value<0:flags.append('negative_consumption')
-                if isinstance(note,str) and note.strip() and (meter_id in note or 'incomplete' in note.lower()):flags.append('workbook_quality_note')
-                # Explicit final-day incompleteness in this supplied snapshot.
-                if (meter_id,date) in {('PWST104274','2026-08-10'),('PWST152089','2026-08-13')}:flags.append('snapshot_incomplete_final_day')
-                if date in indexed and indexed[date]['raw_energy_kwh']!=float(value):raise DataError('Conflicting utility readings on the same day')
-                indexed[date]={'date':date,'meter_id':meter_id,'energy_kwh':float(value) if not flags else None,'raw_energy_kwh':float(value),'quality':'excluded' if flags else 'good','source_flags':';'.join(flags),'source_sheet':name}
-        rows=list(indexed.values())
     elif kind=='normalized':
         f=pd.read_csv(path,dtype={'meter_id':str})
         if not {'date','meter_id','energy_kwh'}<=set(f):raise DataError('Normalized CSV requires date, meter_id, energy_kwh')

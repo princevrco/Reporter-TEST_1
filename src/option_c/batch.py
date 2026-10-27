@@ -12,11 +12,15 @@ from .optimizer import prepare as prepare_optimizer,summaries as optimizer_summa
 from .effects import analyze as analyze_effects
 from .quality import assess,withhold
 from .resilient import fit as resilient_fit,sensitivity
+from .weather import read as read_weather, join as join_weather
 
 
-def bms_context(path,timezone):
+def bms_context(path,timezone,allow_empty=False):
     path=Path(path);f=pd.read_csv(path)
-    if 'timestamp' not in f or f.empty:raise DataError('Live BMS CSV needs timestamp and data rows')
+    if 'timestamp' not in f:raise DataError('Live BMS CSV needs timestamp')
+    if f.empty and allow_empty:
+        return {},{'rows':0,'unique_timestamps':0,'source_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'role':'No complete BMS rows accepted; no BMS context or consumption inferred'}
+    if f.empty:raise DataError('Live BMS CSV needs data rows')
     if any(pd.isna(t) or pd.Timestamp(t).tzinfo is None for t in f.timestamp):
         raise DataError('Live BMS timestamps require explicit offsets')
     f['timestamp']=pd.to_datetime(f.timestamp,utc=True,format='mixed')
@@ -32,7 +36,7 @@ def bms_context(path,timezone):
     return context,audit
 
 
-def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=False,optimizer_paths=None,progress=None,quality_reviews=None):
+def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=False,optimizer_paths=None,progress=None,quality_reviews=None,weather_path=None):
     if cfg.get('resolution')!='daily':raise DataError('Raw all-meter workflow currently supports daily kWh only')
     if cfg.get('independent_variables'):raise DataError('Two-file mode does not accept separate independent variables; use the full workflow')
     a,b=stamp(start,cfg['timezone'],True),stamp(end,cfg['timezone'],True)
@@ -43,7 +47,7 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
     if (b-a).total_seconds()/86400>40000:raise DataError('Requested window exceeds 40000 days')
     if any(t.tz_convert(cfg['timezone']).time()!=pd.Timestamp('00:00').time() for t in (a,b)):
         raise DataError('Daily boundaries must be local midnight')
-    context,audit=bms_context(bms_path,cfg['timezone'])
+    context,audit=bms_context(bms_path,cfg['timezone'],bool(cfg.get('allow_empty_bms_context',False)))
     carma=prepare(meter_path,kind=kind,carma_daily_kwh=carma_daily_kwh) if kind=='carma' else None
     normalized=pd.read_csv(meter_path,dtype={'meter_id':str}) if kind=='normalized' else None
     if normalized is not None and not {'date','meter_id','energy_kwh'}<=set(normalized):raise DataError('Normalized meter data needs date, meter_id, energy_kwh')
@@ -51,6 +55,10 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
     if not meters:raise DataError('No meters found in source')
     out=Path(output);out.mkdir(parents=True,exist_ok=True)
     save(out/'bms-audit.json',audit)
+    weather=None
+    if weather_path:
+        weather,wa=read_weather(weather_path,cfg['timezone'])
+        weather.to_csv(out/'external-weather.csv',index=False);save(out/'weather-audit.json',wa)
     source_audit=carma.attrs.get('source_audit') if carma is not None else None
     if source_audit:save(out/'meter-import-audit.json',source_audit)
     zone_daily=features=groups=optimizer_audit=None;profiles=[];zone_effect_rows=[]
@@ -82,6 +90,10 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
             'Optimizer modes and threshold consistency do not prove physical equipment operation',
             'Zone-meter percentages are statistical associations; physical mappings and causal effects require review',
             'Operation predictions remain separate from actual reporting consumption and measured savings']
+    if weather is not None:
+        summary['external_weather_supplied']=True
+        summary['method']='Historical meter calendar and external-weather candidate regression; BMS response remains separate'
+        summary['limitations'][0]='Daily outdoor temperature supplied; other unmeasured/non-routine changes remain unadjusted'
     quality_events=[];reviewed_parts=[]
     resilient=cfg.get('baseline_options',{}).get('enabled',False)
     quality_enabled=cfg.get('data_quality',{}).get('enabled',False)
@@ -97,8 +109,16 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
             c=deepcopy(cfg);c['meter_id']=meter;c['allow_meter_only_baseline']=True
             c['boundary_description']=f'Raw source meter {meter}; physical boundary requires verification'
             c.setdefault('review',{})['meter_boundary_verified']=False
-            # Deliberately use calendar-only regression consistently in two-file mode.
             part=part.drop(columns=['temperature_c'],errors='ignore').copy()
+            if weather is not None:
+                required_dates=part[(part.date<str(baseline_end.tz_convert(c['timezone']).date()))|((part.date>=first)&(part.date<last))].copy()
+                # Validate all required observed dates plus the complete requested reporting grid.
+                join_weather(required_dates,weather)
+                join_weather(pd.DataFrame({'date':pd.date_range(first,last,inclusive='left').date.astype(str)}),weather)
+                values=weather.set_index('date').temperature_c
+                part['temperature_c']=part.date.map(values)
+                c['external_weather_enabled']=True
+                c['allow_meter_only_baseline']=False
             # Report source consumption independently of whether a baseline can be fitted.
             observed=part[(part.date>=first)&(part.date<last)].copy()
             energy=pd.to_numeric(observed.energy_kwh,errors='coerce')
@@ -157,7 +177,7 @@ def run(meter_path,bms_path,cfg,start,end,output,kind='portal',carma_daily_kwh=F
             for row in result['periods']:
                 day=pd.Timestamp(row['timestamp']).tz_convert(c['timezone']).date().isoformat()
                 row.update(context.get(day,{'bms_samples':0,'bms_hours_with_samples':0}))
-            result['gates']=sorted(set(result['gates']+['calendar_only_unadjusted_comparison']+
+            result['gates']=sorted(set(result['gates']+(['external_weather_adjusted_comparison_requires_review'] if weather is not None else ['calendar_only_unadjusted_comparison'])+
                 ([] if optimizer_paths else ['bms_context_only_no_energy_inference'])))
             write(result,folder/'savings')
             entry.update(status=result['status'],valid_baseline_periods=model['valid_periods'],

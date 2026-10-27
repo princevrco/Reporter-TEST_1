@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "promenade-option-c"
-version = "0.6.2"
+version = "0.9.2"
 description = "Meter-level baseline regression, energy forecasting and M&V review"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -17,6 +17,7 @@ runpod = ["runpod>=1.7,<2"]
 
 [project.scripts]
 option-c = "option_c.cli:main"
+option-c-project = "option_c.project_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

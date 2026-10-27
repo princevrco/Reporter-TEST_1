@@ -19,7 +19,10 @@ def execute(payload,root):
         if old['request_sha256']!=sha:raise DataError('Request identifier reused with different content')
         return old['result']
     action=payload['action']
-    if action in ('train','train_post'):
+    if action=='run_project':
+        from .project_job import execute as execute_project
+        result=execute_project(payload,base,request)
+    elif action in ('train','train_post'):
         cfg=payload['config']
         if cfg.get('site_id')!=site:raise DataError('Configuration site must match authorized job site')
         result=fit(payload['rows'],cfg) if action=='train' else train_post(payload['rows'],payload['bms_rows'],cfg)
@@ -30,7 +33,7 @@ def execute(payload,root):
         else:
             post=load(base/'models'/(identifier(payload['post_model_id'])+'.json')) if payload.get('post_model_id') else None
             result=savings(baseline,payload['rows'],payload['start'],payload['end'],post,payload.get('bms_rows'),payload.get('adjustments'),payload.get('flat_rate'))
-    else:raise DataError('Actions: train, train_post, forecast, savings')
+    else:raise DataError('Actions: run_project, train, train_post, forecast, savings')
     save(base/'inputs'/(request+'.json'),payload)
     save(job,{'request_sha256':sha,'result':result})
     return result

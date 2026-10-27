@@ -1,579 +1,212 @@
-# Promenade energy analysis
+# Promenade electricity forecasting and policy comparison — v0.9.2
 
-Daily meter baseline regression, energy forecasting and measurement-and-verification
-review tools. Version **0.6.2**. Python **3.11 or 3.12**. Runs on CPU.
+Daily meter readings, timestamped BMS/optimizer observations and external weather feed separate historical savings, consumption-model validation and future policy projections. No new hardware or BACnet writes are needed. The original v0.6.2 and newer working checkout have not been overwritten.
 
-The project analyzes all supplied meters independently. It compares measured energy
-with a frozen historical baseline, forecasts baseline consumption for a selectable
-period, and converts energy differences to CAD at a configurable flat rate.
-It runs locally or in a Runpod Pod. It does not connect to CARMA or write BACnet commands.
+## Mapper native observation provenance (v0.9.2)
 
-## Analysis scope
+The companion `live_bms_history.observations.npz` is auto-detected beside `live_bms_history.csv`. An alternative name can be supplied with `--bms-observation-mask local/history.observations.npz`. Currently this option requires one combined BMS CSV. Runpod project jobs accept the companion under `files.bms_observation_mask`.
 
-### Investigating virtual-meter anomalies
+The companion must come from the native H5 observation timestamps. Never manufacture it by treating all CSV blanks as absent: that would erase real missing records. It stores packed observation bits, signal columns, UTC timestamps and the exact CSV SHA-256. Modified CSVs or mismatched timestamps are rejected. Renaming the files does not change the CSV hash, but editing or re-saving the CSV does. Without a verified companion, blank cells remain conservative invalidations.
 
-Promenade's proposed total = EMPs 1–11 + EMPs 12–23 identity is configured in
-`config/promenade-test.json` under `meter_reconciliation`. Analysis exports
-`meter-reconciliation.csv` and JSON. These check arithmetic consistency, not the
-physical electrical boundary. Missing children never become zero or a replacement
-total. Virtual zeros between positive adjacent days now require quality review,
-including isolated zeros that a sustained-zero-run screen would miss.
-
-To investigate an existing run without changing its inputs:
+For the supplied input bundle, extract its `local/` folder into this project. It contains the unchanged combined CSV and the matching companion, both named for automatic detection. Keep your Alectra workbook and weather CSV in `local/` as before.
 
 ```bash
-python scripts/investigate_meter_anomalies.py \
-  --meter results/aug15-oct20/merged-meter.csv \
-  --output results/anomaly-investigation --rate 0.12
-```
-
-The investigation exports event-day evidence, proposed-identity reconciliation,
-an unverified panel-name sum comparison, a provider request draft, and baseline
-exclusion sensitivity. The latter compares unchanged source data against
-diagnostic exclusion of flagged baseline spikes and isolated virtual zeros;
-reporting consumption and dates stay fixed. It does not issue review approvals,
-change source data, supply missing kWh, or release savings. A panel-name sum is
-not a verified virtual-meter formula. Send the provider draft yourself if needed;
-the application sends no messages. Apply documented source corrections only
-through the existing quality-review ledger workflow.
-
-### Output interpretation
-
-All fitted numerical differences are now displayed regardless of model review
-status. `difference_kwh` and `difference_cad` are baseline minus measured energy
-on identical eligible dates. Review status does not erase that arithmetic; it
-indicates whether the baseline can be trusted. Existing `savings_*` fields retain
-their release rules for compatibility. No failed model is relabelled as verified.
-`estimated_savings_kwh` and `estimated_savings_cad` always expose the same
-calculated difference when available, with `difference_status` alongside them.
-
-`consumption-comparison-summary.csv` and `consumption-comparison-daily.csv`
-separate five calculations: baseline minus meter; baseline minus optimizer
-reconstruction; meter minus optimizer reconstruction; and the corresponding two
-comparisons using independent held-out optimizer predictions. Every comparison
-exports matched days and both consumption totals. Complete-period fields require
-every day. Missing BMS days stay missing. Fitted reconstruction and independent
-validation are never mixed. Meter minus optimizer is prediction error, not avoided
-energy: both describe the same controlled operation. Baseline minus optimizer is
-a model-to-model avoided-energy estimate, subject to both models' limitations.
-
-`calculated_forecast_kwh` and CAD expose every available baseline regression
-forecast, including flagged models, alongside `forecast_status`. These are
-no-intervention forecasts; an optimized forecast needs an explicit future BMS
-trajectory (`--future-bms`). Setpoint changes do not by themselves specify future
-zone temperatures or electrical consumption. Zero/unused meters with no fitted
-model and missing optimizer observations retain an explicit unavailable result;
-the application never fabricates coefficients or replaces missing input with zero.
-
-A second forecast, `continued_control_forecast_kwh` and CAD, fits weekday OLS to
-the observed controlled-period meter readings. It requires at least 42 days,
-28 training days, four examples of each weekday, and a separate last-14-calendar-day
-holdout. Earlier rolling folds select the lookback (all, 35 or 42 days) and whether
-to include a linear trend, where enough observations exist. Selection never uses
-the outer holdout targets. A final refit uses the selected lookback after validation.
-The forecast assumes recent control policy and load patterns continue; it is not
-a simulation of future setpoint changes, weather or seasonal loads. Its numerical
-prediction remains visible alongside error metrics and review flags. Daily values
-are exported in `continued-control-forecast-daily.csv`, and each fitted artifact
-is saved as `continued-control-forecast.json`. No historical reporting day is
-replaced by a forecast, and the future meter targets never enter fitting.
-
-| Output | Interpretation |
-| --- | --- |
-| Historical baseline | Estimated no-intervention energy from historical meter readings |
-| Reporting comparison | Baseline minus measured kWh for matching eligible dates |
-| CAD comparison | Signed kWh difference multiplied by the selected CAD/kWh rate |
-| Three-month forecast | Future no-intervention baseline consumption; not optimized consumption |
-| Optional zone analysis | Estimated thermal-mode durations and statistical meter associations, subject to timing, coverage and identification checks |
-
-The two-file workflow uses a **calendar-only regression**. BMS data supplies timestamp
-coverage context, not electrical consumption or verified runtime. Weather and other
-operating changes are not adjusted in that workflow. A passed import or completed run
-does not establish verified savings, a causal BMS effect, or standards certification.
-The full CLI also supports supplied weather and independent covariates, as well as
-daily or fixed 15/30/60-minute energy intervals. `run-all` supports daily data only.
-
-The methodology references the supplied IPMVP December 1997 Option C document;
-`config/protocol-reference.json` records that reference. Site commissioning, a reviewed
-M&V plan, meter boundaries, adjustments and an uncertainty assessment remain required
-before decision-grade savings claims. This package does not implement every protocol procedure.
-
-## Install and verify
-
-Extract or clone the repository, then change into the folder containing `pyproject.toml`.
-Do not move an existing virtual environment between folders; recreate it instead.
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
 python -m pip install -e '.[test,excel]'
 python -m pytest -q
-```
-
-On Windows PowerShell, activate with `.\.venv\Scripts\Activate.ps1`.
-
-A synthetic demonstration is available without private data:
-
-```bash
-python examples/demo.py --output results/synthetic-demo --optimizer
-```
-
-Synthetic examples are not site results. The test extra includes pytest; the Excel
-extra is needed only for Excel imports and workbook tests. Core CSV workflows need
-only the base dependencies. Runtime dependencies are specified in `pyproject.toml`.
-
-## Private input files
-
-No real site data, trained models, generated reports, credentials or session captures
-are included. Create `local/` inside the repository and place these files there:
-
-```text
-promenade-option-c/
-  pyproject.toml
-  config/promenade-test.json
-  local/
-    consumption_kwh.zip
-    live_bms_history.csv
-```
-
-The CARMA ZIP must contain daily **Consumption kWh** CSV exports and their matching
-quality JSON files, as produced by the separate exporter. Demand kW, cumulative
-counters and monthly exports are not interchangeable with daily interval energy.
-An extracted directory of those files is also accepted. The wide BMS CSV must have
-a `timestamp` column with explicit UTC offsets. All meter IDs remain separate.
-
-The data ZIP distributed privately in the earlier test can supply these two files.
-Do not upload it, its contents, generated results or a virtual environment to GitHub.
-`.gitignore` and `.dockerignore` exclude the standard private paths and data formats;
-inspect staged files before committing. Custom folders and renamed files still need review.
-
-## Promenade configuration
-
-Use `config/promenade-test.json` for the supplied snapshots. Its full-control start has been confirmed; the other site assumptions remain under review:
-
-- Full-control start: **August 15, 2026**, confirmed by the user for all assets on October 21.
-- Baseline end, exclusive: **July 24, 2026**, excluding uncertain early commissioning/control history.
-- Daily timezone: `America/Toronto`; CARMA's daily convention still needs confirmation.
-- Review flags remain false until the corresponding facts have been verified.
-
-Edit `intervention_timestamp` and `baseline_end_exclusive` after confirming the actual
-control history. The baseline end cannot be later than intervention. Earlier asset
-optimization must also be excluded from untreated training. Do not change review flags
-or loosen validation limits merely to obtain a positive savings result.
-
-`config/site.json` is an example for the advanced CLI, including illustrative BMS
-point mappings. It is not a commissioned all-asset configuration.
-
-## Meter download for the next test
-
-Export **daily Consumption kWh for every available meter from January 1, 2025
-through October 20, 2026 inclusive**. If CARMA uses an exclusive end date, select
-October 21, 2026. Retain meter IDs, descriptions, date conventions and exporter
-quality/checksum companions. Keep real zeros; do not replace missing days with zero.
-A complete replacement export is preferable when CARMA has revised historical values.
-
-The export should cover both historical training and the entire reporting period.
-Recheck June 10 and November 2, 2025 in particular: the earlier virtual-total export
-contained exceptionally large daily readings on those dates. A flag is an investigation
-request, not proof that the reading is wrong. Confirm corrected values with CARMA.
-
-## Baseline selection and meter quality
-
-The supplied configurations enable the v0.5 daily baseline workflow:
-
-- Fit ordinary least squares, Huber robust regression and weekday median baselines
-  over all available historical data, the latest 365 days and the latest 180 days.
-- Also test annual sine/cosine calendar patterns with one, two or three harmonics for OLS/Huber when each
-  fitting window contains at least a year with 90% coverage. It requires no weather
-  file; it represents recurring calendar seasonality, not actual weather adjustment.
-- Select the estimator/lookback using up to three rolling historical validation folds
-  of 28 calendar days. At least two folds and 60 valid training days are required.
-- Keep the final 56 historical calendar days as a shared, untouched test period.
-  Every candidate is evaluated on those same dates; at least 80% coverage is required.
-  Selection uses inner-fold error, never reporting-period savings or outer-test error.
-- Refit the selected method on its chosen historical lookback. Preserve candidate
-  results and compare reporting-period estimates from validation-passing alternatives.
-  A spread above 10% of the selected baseline triggers review.
-- Screen for extreme spikes, sustained zero runs and historical level changes.
-  Screening thresholds are configurable engineering heuristics, not IPMVP limits.
-  Flags preserve the source reading and withhold headline comparisons until reviewed.
-
-The default held-out limits are CVRMSE <=20% and absolute NMBE <=5%. These are project
-screens, not proof of standards compliance. A robust fit reduces the influence of
-outliers but does not establish that they are invalid. Failed validation, unresolved
-quality findings or high method sensitivity withhold the affected savings headline.
-Diagnostic differences remain available for investigation in clearly named fields.
-Future baseline totals are also withheld when baseline quality or validation fails;
-plotted predictions from withheld models are diagnostic only. Existing v0.4 results
-must be rerun to receive these checks; summarizing old artifacts cannot add them.
-
-Review these files before interpreting a result:
-
-| File | Purpose |
-| --- | --- |
-| `meter-consumption.csv` | Source consumption by meter, independent of baseline fitting; available-days and complete-period totals remain separate |
-| `data-quality-events.csv` / `.json` | Flagged dates, reasons and anchored event IDs |
-| `quality-review-summary.json` | Resolved, unresolved and stale/unmatched review IDs |
-| `quality-reviewed-meter.csv` | Analysis copy; corrections/exclusions preserve original kWh |
-| `meter-.../baseline-comparison.json` | Candidate forecasts and method sensitivity |
-| `meter-.../baseline-model.json` | Selected model, chronological validation and review gates |
-| `response/point-coverage.csv` | BMS point cadence, gaps and usable samples |
-| `meter-summary.csv` | Released comparisons, diagnostic differences and reasons for withholding |
-
-`merged-meter.csv` remains the merged original input. No automatic deletion,
-interpolation, clipping or replacement of unreviewed readings is performed. Only a
-documented review can exclude/correct an anchored event in the analysis copy.
-
-To record a decision, copy the event ID into a private JSON ledger such as
-`local/quality-reviews.json`:
-
-```json
-[
-  {
-    "event_id": "COPY_EXACT_EVENT_ID_FROM_REPORT",
-    "reviewed": true,
-    "reviewer": "Reviewer name",
-    "reference": "CARMA support ticket or other documented evidence",
-    "decision": "accept"
-  }
-]
-```
-
-Use `accept` only after confirming the reading is valid; `exclude` for a confirmed
-unusable reading; or `correct` plus `corrected_kwh` for a documented single-day
-correction. An exclusion leaves a missing period; it never creates zero consumption.
-Add `--quality-reviews local/quality-reviews.json` to the analysis command and use a
-new output directory. Event IDs include raw dates/values; stale decisions cannot
-silently apply to revised source readings. Re-exporting corrected data is preferable
-to manual corrections. Do not approve flags merely to obtain plausible savings.
-
-A quality-only preparation run is available with `--prepare-only`. For revised
-CARMA overlaps, first inspect the conflict; use `--overlap-policy prefer-last` only
-when intentionally accepting the newer source revision. The merge audit records it.
-
-This implementation follows the robust-loss and chronological-validation principles
-in the [Huber regression documentation](https://scikit-learn.org/stable/modules/linear_model.html#huber-regression)
-and [time-series validation documentation](https://scikit-learn.org/stable/modules/cross_validation.html#time-series-split).
-The implementation uses NumPy; scikit-learn is not required.
-
-## Consumption estimated from setpoint changes (v0.6)
-
-The all-meter analysis also fits a separate, small **setpoint-response electricity
-model**. It learns kWh relationships from the existing meter readings; no equipment
-rating assumptions, new hardware or separate calibration experiment are required.
-Inputs include cooling/heating setpoint levels, setpoint changes, zone temperature
-and positive temperature-to-setpoint demand proxies. No setpoint-to-kWh conversion
-factor is assumed. A calendar-only comparator tests whether setpoints add predictive
-value on the same held-out dates.
-
-A fixed equipment cohort is selected from **past BMS availability only**, before the
-last 14 calendar days used for testing. Every contributor must be observed; cohort
-membership never silently changes between days. The default bounded signal age is
-30 minutes, accommodating occasional 20-minute sampling gaps without bridging long
-outages. The daily coverage requirement remains 90%. Confirm point meanings, units
-and permitted state age before using the estimates operationally.
-
-This small model is distinct from the legacy multi-feature Ridge response. It requires
-at least 28 covered outer-training days, at least four training observations per fitted
-coefficient in every inner fold, and at least eight later held-out days. The legacy
-40-day training floor is unchanged. Scaling and penalty selection use earlier data;
-held-out targets cannot select or train the frozen test predictor. These are engineering
-validation rules, not prescribed minimums from IPMVP. Historical backtests are development
-evidence and do not replace future independent validation.
-
-| Output | Meaning |
-| --- | --- |
-| `setpoint-response-summary.csv` | Per-meter coverage, test errors, selected family and incremental value |
-| `response/setpoint-feature-definition.json` | Fixed cooling/heating cohorts, excluded assets, mapping and sampling assumptions |
-| `meter-.../setpoint-response/heldout.csv` | Consumption estimates on unseen later days, with support flags |
-| `meter-.../setpoint-response/reporting-daily.csv` | Fitted reconstruction and independent estimates kept in separate columns |
-| `meter-.../setpoint-response/baseline-comparison.csv` | Baseline versus BMS estimates on the same held-out days; diagnostic model-to-model comparison |
-| `financial-summary.json` | Measured energy costs, estimated comparisons, withheld results and BMS coverage at the chosen rate |
-
-**A partial reconstruction is not full-period consumption.** Missing BMS days are not
-filled from meter energy, assumed OFF, or inferred from later readings. Full-period
-BMS consumption remains unavailable if required input days are missing. Fitted-history
-reconstruction is not independent evidence; only the later test estimates appear in
-the BMS chart. No statistical association is presented as a proven zone electrical share.
-
-To evaluate explicit reference setpoints, optionally add
-`--reference-setpoints local/reference-setpoints.json` with values such as:
-
-```json
-{
-  "RTU_03A": {"cooling": 24.0, "heating": 20.0},
-  "FCU_03": {"cooling": 24.0}
-}
-```
-
-Only fitted equipment groups and mapped roles are accepted. Reference values must
-come from a documented policy; the package does not guess pre-deployment settings.
-This scenario holds observed zone temperatures fixed. It is a conditional sensitivity
-calculation, not a simulation of changed thermal evolution or verified causal savings.
-Out-of-support scenarios remain diagnostic. Complete future BMS trajectories remain
-required for optimized future consumption.
-
-The v0.6 baseline also tests additional annual harmonics, and centers coefficient and
-residual bootstrap draws around the point estimate. Historical validation bias remains
-an explicit failure; it is not added to the savings estimate as extra avoided energy.
-Uncertainty bands exclude physical-boundary and causal uncertainty. Exact causal savings
-cannot be observed from these two files: the no-control energy is a counterfactual
-estimate. CAD values are flat-rate energy amounts, not complete utility-bill savings.
-
-## Combine the earlier exports with a new download
-
-Use this workflow for the **August 15–October 20, 2026 inclusive** analysis. Place the
-earlier exports and new exports under `local/`, preserving the original files.
-Supply them in oldest-to-newest order. If the new history already includes all older
-data, you can still supply both; identical overlapping records are collapsed, never summed.
-
-```bash
-python scripts/analyze_promenade.py \
-  --meter local/consumption_kwh.zip local/consumption_kwh-new.zip \
-  --bms local/live_bms_history.csv local/live_bms_history-new.csv \
+python scripts/run_project.py \
+  --meter "local/Promenade_Alectra_Daily_kWh_2026-10-26.xlsx" \
+  --meter-kind utility \
+  --bms local/live_bms_history.csv \
+  --weather local/weather_daily.csv \
+  --weather-scenario climatology \
   --start 2026-08-15 --end 2026-10-21 \
-  --forecast-start 2026-10-21 --forecast-end 2027-01-21 \
-  --rate 0.12 --output results/aug15-oct20
+  --forecast-start 2026-10-26 --forecast-end 2027-01-26 \
+  --rate 0.12 \
+  --output results/promenade-v092
 ```
 
-New meter inputs may be raw daily Consumption CSV, exporter ZIP or extracted directory.
-Every directory/ZIP chunk still requires its exporter quality companion and valid checksum.
-The BMS inputs must be wide history/update CSVs with offset-aware timestamps.
+`--end` is exclusive: October 21 includes October 20. For a report including October 6, use `--end 2026-10-07`. More timestamps do not necessarily create more complete eligible days. Do not shorten the reporting period or reduce validation requirements merely to force a model fit.
 
-Conflicting meter revisions or BMS cells stop the default run. Review the reported
-conflict. If the last supplied export is the authoritative revision, rerun into a new
-output directory with `--overlap-policy prefer-last`. Every revision is recorded in
-`merge-audit.json`; later non-null BMS cells override older ones at the same timestamp.
-Missing timestamps are not interpolated. Revised invalid meter data remains invalid;
-it is not silently replaced with an older valid number.
+## Outputs and their meanings
 
-The new download must contain **complete meter readings through October 20**. The
-earlier snapshot ends October 15 and alone cannot produce complete-window savings.
-Incomplete periods remain unavailable while paired-period comparisons remain visible.
-The confirmed control date is August 15. The baseline still conservatively excludes
-July 24 onward because of uncertain earlier commissioning. Other review flags remain.
+| Output | Calculation / meaning |
+|---|---|
+| Actual energy | Sum of actual daily meter kWh, with available-day and complete-period totals separate. |
+| Historical baseline comparison | Pre-control meter calendar/weather baseline minus actual optimized meter consumption. |
+| BMS consumption reconstruction | Meter-calibrated model fitted against eligible BMS daily features. Training reconstruction is not independent validation. |
+| Meter-minus-BMS residual | Consumption-model error, not savings. Independent withheld predictions are separate. |
+| Meter-history future forecast | Recent controlled meter/weather pattern continuation, with its own withheld validation and support checks. |
+| Future old-policy consumption | Weather-forced thermal rollout and meter-calibrated electrical regression under documented old setpoints/schedules. |
+| Future optimized-policy consumption | The same models, dates, weather and initial state, using the planned optimized policy. |
+| Projected policy difference | Old-policy prediction minus optimized-policy prediction on identical conditions. Conditional projection, not verified savings. |
+| Historical old-policy replay | Separate models calibrated strictly before reporting start; replay old policy against actual historical weather and compare with measured energy. Blocks when earlier calibration/initialization is inadequate. |
 
-### BMS electrical response
+CAD values use the assumed flat energy rate (default CAD 0.12/kWh). They exclude demand charges, taxes, fixed charges and Global Adjustment. Models do not claim exact utility-bill savings or automatic IPMVP/ASHRAE certification. Source boundary, measurement, non-routine changes and causal uncertainty still require review.
 
-The new workflow also learns a **separate Ridge regression** from synchronized meter
-energy and BMS features. No manual calibration file or external weather file is required.
-It does not change the frozen historical baseline or replace missing meter readings.
+## Date-level BMS eligibility (corrected in v0.9.2)
 
-Features include equipment-specific and aggregate stage/fan/valve proxies, temperatures,
-active setpoints, positive heating/cooling temperature deviations, setpoint changes,
-and previous-day values. Time alignment is past-only with a bounded signal age.
-An invalid status interrupts propagation; gaps remain unknown. Daily features require
-90% bin coverage by default. These are sampled operation proxies, not measured runtime.
+The primary command remains `scripts/run_project.py` (installed equivalent `option-c-project`). Missing **dates/daily model inputs**, not blank cells anywhere in a wide row, determine eligibility.
 
-The generated `response-config.json` proposes equipment bindings from column names.
-Inspect them and verify encodings, units, shared equipment and relevance. A proposed
-mapping is marked `semantics_verified: false` and all resulting fits retain that gate.
-Discrete roles accept only 0/1; values such as 0.5, 3 or 10 are not automatically
-interpreted as discrete stages. Valve roles use 0–100, temperature/setpoint roles -20–60 C.
-Adjust source preparation/mappings to the actual point definitions rather than guessing.
+- Retain timestamped rows with sparse/unrelated signal cells. Reject only invalid/missing timestamps at initial import.
+- Validate temperature/setpoint observations per signal; invalid values become unavailable for that signal, without discarding other observations in the row.
+- Select a fixed asset cohort using earlier BMS availability only (never heldout data or meter targets). Automatically added assets cannot reduce the maximum earlier covered-day count. Explicit signal-config groups are respected without automatically dropping assets.
+- With a verified native observation mask, derive daily predictors by aligning each required signal's actual observations within its bounded validity. Alignment-only blanks are not new observations. A genuine native blank immediately invalidates that signal. Without a mask, retain conservative behavior: every row is treated as an observation for every column.
+- Observations represent bounded validity until the next observation or maximum age (default 30 minutes), with exact midnight splitting. This is a declared snapshot-validity assumption, not synthesized readings.
+- Exclude a whole date when required daily features are missing or covered hours are below the configured quality threshold (default 90%). Completely absent dates are listed in the audit and never filled with zero or interpolated energy.
+- Ignore blank columns not used by the fixed model cohort. Keep meter-only calculations separate from BMS-eligible date comparisons.
+- Thermal identification accepts genuinely adjacent observations at irregular intervals up to the same bounded age; longer gaps and invalid endpoint values are excluded. Rollout validation does not bridge unobserved gaps.
 
-For a preparation-only pass, add `--prepare-only` to the command with a separate output
-directory. Review its proposed mappings, then provide them on the full run:
+Outputs: `bms-observations.csv`, `eligible-bms-observations.csv`, `bms-date-audit.json`, `bms-date-coverage.csv` and `asset-daily.csv` show the decisions. `rejected-bms-rows.csv` now records invalid timestamps, not harmless blank signals. `--required-bms-columns` declares additional signals required for date eligibility; it does not reinstate all-column row rejection.
+
+With the combined October 26 Mapper export and its verified native mask, 11,561 timestamp rows occur before October 21. The corrected cohort has 13 assets and 40 eligible dates. The current Alectra input yields 31 training / 5 test matched days for PWST104274 and 31 / 0 for PWST152089. BMS regression therefore remains blocked by the unchanged project screening minimum of 40 training and 8 later test days; these counts are not universal IPMVP requirements.
+
+Legacy helper `strict_history.clean` is retained for reproducing older behavior, but the primary workflow uses `date_history.py`.
+
+## Install
+
+From this project root:
 
 ```bash
-# Use alongside the --meter / --bms arguments above:
-# --response-config results/preparation/response-config.json
+python -m venv .venv
+# Git Bash on Windows:
+source .venv/Scripts/activate
+# On Runpod/Linux use: source .venv/bin/activate
+python -m pip install -e '.[test,excel]'
+python -m pytest -q
+python -c "import importlib.metadata; print(importlib.metadata.version('promenade-option-c'))"
 ```
 
-The regression selects well-covered, varying features using only an initial training
-prefix, caps their number (default 24 BMS features), adds weekday schedule terms, and tunes the Ridge penalty with expanding
-chronological folds. Each fold learns its own scaling. The final 20% is held out for
-evaluation; the saved final model then refits all eligible data before the reporting
-end. The defaults require at least 40 training days and 8 later holdout days after
-feature/energy quality exclusions. Insufficient coverage produces an explicit unavailable
-status. A selected feature subset does not establish every asset's separate effect.
+Expected version: **0.9.2**. Reinstall after changing project directories so an older editable installation is not imported.
 
-Additional outputs:
+## First real-data run
 
-| File | Purpose |
-| --- | --- |
-| `merge-audit.json` | Input hashes, identical overlaps and explicit revisions |
-| `response-config.json` | Applied or proposed BMS bindings and response settings |
-| `response/daily-features.csv` | Coverage-screened daily features and one-day lags |
-| `response/feature-audit.json` | Rejected values, signal coverage and feature definitions |
-| `response-summary.csv` | Each meter's BMS fit, penalty, held-out errors and blockers |
-| `meter-.../response/heldout.csv` | Independent chronological consumption estimates |
-| `meter-.../response/fit-diagnostics.csv` | In-sample diagnostics; never independent savings evidence |
-| `meter-.../response/model.json` | Checksum-protected final electrical response model |
-
-The dashboard overlays eligible held-out BMS consumption estimates in purple. The
-training-period diagnostic fit is deliberately excluded from that plot. Meter minus
-BMS-estimated consumption is **prediction error**, not savings. Reported kWh/CAD
-differences continue to use historical baseline minus measured consumption.
-
-### Future optimized consumption
-
-The three-month calendar baseline forecast remains available. A BMS response model
-also needs a **future operating trajectory** to predict optimized consumption: expected
-temperatures, states, setpoints and other mapped signals on the same timeline. Today's
-live readings alone do not specify the next three months. No last-value future is invented.
-
-Provide that wide timestamped scenario with `--future-bms local/optimized-scenario.csv`.
-It must include prior-day context for lags. The model predicts only dates after its
-training end; missing and negative predictions remain unavailable, and operating-range
-extrapolation is flagged. The dashboard shows the conditional optimized trajectory in red.
-It is not a validated free-running forecast merely because the electrical mapping passes.
-
-For a separate projected control-policy comparison, also provide
-`--baseline-future-bms local/old-policy-scenario.csv`. Both trajectories must represent
-comparable external conditions and consistent thermal/equipment dynamics. Replacing only
-setpoints while retaining the optimized temperatures/runtime is not a valid old-policy
-trajectory. The script does not generate or certify these scenarios.
-Per-meter `response/scenario-comparison.csv` records conditional kWh/CAD differences
-only when both predictions exist and remain inside fitted feature ranges. Site/BMS
-review gates still apply; these differences are not realized or verified causal savings.
-
-## Run the daily comparison and forecast
-
-From the repository root with the environment active:
+Place your files under local/. No private input data is included in the code archive.
 
 ```bash
-python scripts/test_promenade.py \
+python scripts/run_project.py \
+  --meter 'local/Promenade_Alectra_Daily_kWh_2026-10-26.xlsx' \
+  --meter-kind utility \
+  --bms local/live_bms_history.csv \
+  --weather local/weather_daily.csv \
+  --weather-scenario climatology \
   --start 2026-08-15 --end 2026-10-21 \
-  --forecast-start 2026-10-21 --forecast-end 2027-01-21 \
-  --rate 0.12 --output results/promenade-test
+  --forecast-start 2026-10-26 --forecast-end 2027-01-26 \
+  --rate 0.12 --output results/promenade-project-first
 ```
 
-Dates are site-local. **End dates are exclusive.** This example compares August 15–October 20
-and forecasts October 21–January 20. Without forecast flags, the forecast starts on the
-current site-local date and lasts three calendar months. Reporting defaults cover August 15–October 20; choose reporting dates appropriate to each new export.
+Change dates to your actual available data. Reporting and forecast end dates are exclusive. The future start must not precede reporting end. Choose a new output directory for every run.
 
-The runner validates inputs, fits every meter separately, prints progress, and writes
-the dashboard. Use a new output directory for each full run; existing directories are
-not overwritten. Alternative input paths are accepted with `--meter` and `--bms`.
-Missing readings are not filled with invented energy. All-zero, unidentifiable or
-invalid meters may be blocked. Poor held-out performance is recorded as a review gate.
+This first run generates actual-cohort `old_policy-request.json`, `optimized_policy-request.json` and `initial-state-request.json` with missing values deliberately left unfilled. It also generates the date eligibility audit and any available meter-only outputs. BMS/policy outputs with missing prerequisites have explicit blockers, not invented values.
 
-### Reuse existing models
+The supplied October 26 Alectra workbook has 63/67 reporting readings for PWST104274 and 53/67 for PWST152089. Three low/completeness-unverified readings are retained with review flags. The BMS export is now processed by date using its required signals; blank unrelated columns do not discard useful dates. Missing meter dates and source-quality review flags remain unresolved.
 
-To change forecast dates or the energy rate without repeating import/training:
+## Supply actual policies for the full comparison
+
+Fill COPIES of the generated policy requests and place them in local/old_policy.json and local/optimized_policy.json. Document the reference and whether the assumptions have been reviewed. Do not guess old occupied hours or equipment margins from optimizer training settings.
+
+For every fitted asset provide:
+
+- `weekdays`: occupied days, Monday=0 through Sunday=6.
+- `occupied_start` / `occupied_end`: local HH:MM. Equal times mean 24 hours on listed days; overnight schedules use the preceding weekday after midnight.
+- `occupied_cooling_c`, `unoccupied_cooling_c`, `occupied_heating_c`, `unoccupied_heating_c`: numeric Celsius or the explicit string `OFF`. Null is not accepted as OFF.
+- `control_margin_c`: explicit nonnegative threshold margin. Cooling effective threshold is cooling setpoint plus margin; heating effective threshold is heating setpoint minus margin. This is an explicit continuous-demand surrogate assumption, not an identified equipment hysteresis cycle.
+
+Then rerun with a new output path and add:
 
 ```bash
-python scripts/summarize_promenade.py \
-  --results results/promenade-test \
-  --forecast-start 2026-10-21 --forecast-end 2027-01-21 \
-  --rate 0.12
+--old-policy local/old_policy.json \
+--optimized-policy local/optimized_policy.json
 ```
 
-This regenerates the overview, forecast files and summary CSV inside the selected
-results directory. It reuses frozen model artifacts and does not retrain them with
-new readings. Preserve a results copy if you need the previous forecast output.
-Results from versions 0.3.1 and 0.3.2 can be used via an absolute `--results` path.
+If the last usable BMS observation is within 30 minutes before forecast start and the internal thermal models pass validation, initialization uses one step over the actual elapsed time. A longer gap is not held constant: supply `--initial-state local/initial-state.json`, with the exact forecast-start timestamp, source reference and all asset temperatures. Do not invent those temperatures. `--historical-initial-state` serves the independent historical replay when its start state is unavailable.
 
-## Read the results
-
-Download `results/promenade-test/index.html` and open it in a browser. It is a standalone
-HTML file with embedded data and requires no web server. Select a meter to see:
-
-- Reporting-period baseline and measured consumption.
-- Future baseline forecast, distinguished from measured values.
-- Signed complete-period kWh differences and CAD at the chosen rate.
-- Validation findings and unverified virtual-total candidates.
-
-| File | Contents |
-| --- | --- |
-| `overview.json` | Dashboard data, forecast window, rate and selected-boundary totals |
-| `meter-summary.csv` | Per-meter forecast, kWh/CAD differences, validation and blocked reasons |
-| `forecast-daily.csv` | Daily future baseline predictions by meter |
-| `boundary-candidates.csv` | Existing virtual totals, kept separate and unverified |
-| `site-total.json` | Total for an explicitly selected boundary, otherwise unavailable |
-| `summary.json` | Original comparison run, meter folders and review gates |
-| `meter-.../savings/` | Reporting-period JSON, CSV and HTML |
-| `meter-.../future-forecast/` | Latest future-forecast JSON, CSV and HTML |
-| `meter-import-audit.json`, `bms-audit.json` | Source provenance, import validation and BMS coverage |
-
-Negative differences mean measured usage exceeded the predicted baseline. Complete-period
-values remain unavailable when any required date is missing. Paired values refer only
-to eligible matched dates; they are not complete-window savings. CAD uses the same
-flat rate on both sides and excludes demand charges, taxes, fixed charges and other
-bill components. Future optimized usage and future realized savings are unavailable.
-
-### Whole-site totals
-
-Predicting usage cannot resolve an unknown electrical boundary. The CARMA data includes
-physical meters, submeters and virtual totals; summing all meters can double-count loads.
-Until a non-overlapping boundary is identified, the site total remains unavailable.
-The existing virtual totals are candidates, not automatically verified mall totals.
-
-After verifying the appropriate meter or non-overlapping set, supply the actual IDs:
+## External weather
 
 ```bash
-# Replace MAIN_METER_ID with the verified CARMA code.
-python scripts/summarize_promenade.py --total-meters MAIN_METER_ID --rate 0.12
+python scripts/download_weather.py \
+  --start 2023-01-01 --end 2026-10-21 \
+  --output local/weather_daily.csv
 ```
 
-Multiple IDs are accepted after `--total-meters`. This is the operator's boundary
-declaration, not automatic wiring verification. Missing or blocked selected meters
-keep totals unavailable. Paired totals use common eligible dates across all selected
-meters; complete totals require the full window for all of them. Model/site review
-gates still apply to any numerical total.
+Open-Meteo download dates are inclusive; regression window ends are exclusive. Defaults are the supplied Promenade coordinates, America/Toronto, Celsius daily mean and ECMWF IFS historical weather. Change location/timezone for other sites. Original API response/query/hashes are cached. Provider terms apply.
 
-## Optional optimizer and advanced CLI
+CSV format: `date,temperature_c` (or `outdoor_temp_c`), one local daily mean per date. No duplicates, invalid units, missing values or silent gaps. Weather for historical fitting must cover historical observations and reporting days.
+
+Future options:
+
+1. `--future-weather local/future_weather.csv --future-weather-basis 'Provider/model issue time or explicit scenario reference'`.
+2. Explicit `--weather-scenario climatology`: mean of past observations within +/-7 calendar days, at least two historical years; all source dates strictly precede forecast start.
+
+Climatology is a weather scenario, **not a three-month weather forecast**. No future weather is silently inferred when neither option is chosen. Daily mean outdoor temperature is treated as constant intraday forcing in the empirical thermal model; high-frequency weather variation is not measured by this input.
+
+## Model design and validation
+
+Historical baseline retains the robust OLS/Huber/calendar/weather candidate engine and its review gates. Source readings/spikes are not automatically removed.
+
+The new meter/electrical model fits nonnegative Ridge coefficients against daily meter energy, using chronological inner penalty selection and a separate final 14-calendar-day holdout with at least eight complete observations. The BMS model requires at least 40 earlier complete days. Its predictors are weekday/weekend background hours, outdoor heating/cooling degree-hours and pooled asset cooling/heating degree-hours and thermal-call proxy hours. No individual asset kW allocation is claimed. Final refit reconstruction and frozen withheld predictions are distinct.
+
+Thermal model per asset:
+
+`dT/dt = b0 + a*(outdoor-T) - c*max(T-cooling_SP,0) + h*max(heating_SP-T,0) + daily sine/cosine terms`
+
+The heat-transfer/cooling/heating coefficients have sign/bound constraints. Earlier folds select regularization; a later holdout tests free-running local-day trajectories without assimilating later measured temperatures. Default project screen: at least two complete day rollouts, RMSE <=1.5 C and no worse than persistence. This is not a standards-prescribed universal threshold. Unidentifiable or failed asset models block internal policy forecasts; no constant-temperature fallback is used.
+
+Three-month projections exceed the one-day thermal validation horizon and retain that warning. Joint thermal/electrical/weather/causal uncertainty is not fully quantified. Forecasts remain conditional engineering projections. Numerical passes do not establish meter boundaries or causal savings. Source-quality and support warnings remain visible.
+
+## Neural ODE / STGNN adapter
+
+A future temperature trajectory can replace the internal thermal rollout:
+
+`timestamp,asset_id,predicted_zone_temperature_c`
+
+Supply it using `--old-trajectory` or `--optimized-trajectory`, plus the corresponding `--old-trajectory-evidence` / `--optimized-trajectory-evidence` JSON. Evidence must contain `model_id`, `validation_reference`, `policy_sha256` and `conditions_sha256`. Per-meter trajectory request files contain the required hashes, cadence, exact asset cohort, dates and common initial state. No missing slots, duplicate times, changed policy/weather binding or mismatched initial temperature is accepted. Validation references are retained as evidence requiring review, not automatically trusted certification.
+
+This adapter accepts outputs from your models; it does not train or execute an unavailable latest Mapper/STGNN repository.
+
+## Where to inspect results
+
+Open **project.html** for the end-to-end workflow and **index.html** for the historical baseline report.
+
+- project-summary.json / project-meter-summary.csv: separate forecasts, model residuals, projected differences and blockers.
+- bms-date-audit.json / bms-date-coverage.csv: date eligibility; rejected-bms-rows.csv: invalid timestamps.
+- bms-date-coverage.csv / asset-daily.csv: actual accepted slots and daily features.
+- thermal-model.json: dynamics, heldout rollout results and failed assets.
+- Per-meter bms-power-model.json / bms-consumption-diagnostics.csv: electrical coefficients, reconstructed and withheld kWh.
+- Per-meter meter-weather-forecast.json: recent meter-pattern weather-conditioned forecast.
+- Per-meter old_policy-forecast.json / optimized_policy-forecast.json and trajectories: policy-specific projections.
+- projected-policy-difference.json: only comparable policy conditions; projected kWh/CAD, not exact savings.
+- historical-old-policy-replay.json: independent pre-reporting calibration, if available.
+- Per-meter savings/result.json: historical baseline-minus-actual, with partial/full totals and source/model review gates.
+
+Separate meters and overlapping virtual totals are not automatically summed. Current values remain diagnostic when validation, coverage or source review fails. The prior label suggesting every baseline was calendar-only has been corrected.
+
+## Reproducible complete demonstration
 
 ```bash
-option-c --help
-option-c prepare-optimizer --help
-option-c run-all --help
+python examples/demo_project.py --output results/synthetic-project
 ```
 
-Canonical optimizer CSV records use `timestamp` (valid time), `issued_at`, `zone_id`
-and `achieved_mode`. Confirmed mode meanings are -1 cooling, 0 thermal OFF and 1 heating.
-Optional application/support flags, zone mappings and measured temperature/setpoint
-bindings are configured under `optimizer` in the site config. Thermal OFF does not
-imply zero fan or electrical load. Unknown application and deadband behavior remain uncertain.
+Creates 240 days of complete synthetic BMS/meter/weather observations, old/optimized policies and a supplied three-day weather scenario, then runs every principal forecasting/replay path. All resulting values are **synthetic demonstration only**, not Promenade performance.
 
-The optional response regression learns from synchronized historical meter and eligible
-optimizer records; no separate manual calibration file is required. It needs sufficient
-coverage and independent ON/OFF variation (default 60 training days), held-out validation,
-and reviewed equipment mappings. Associations are not causal zone savings. It does not
-replace measured reporting consumption with an optimizer prediction.
+## Runpod deployment
 
-The supplied legacy archive ending September 14 lacks the explicit timing contract
-required by the importer. It overlaps part of the confirmed control period but is not a
-supported direct input. Its flattened trajectories must not be converted by guessing
-zone order, forecast start, issue time or cadence.
+For a Pod, upload/extract this project, mount private inputs, install the extras and run the commands above. CPU is sufficient for these regressions. GPU hardware is not required unless separately running a Neural ODE/STGNN model.
 
-## Runpod and optional container
+The Dockerfile includes the package, scripts and writable local/results folders. It starts the serverless handler; the image itself has not been built/deployed during this implementation.
 
-For the first deployment, use a Pod with Python 3.11 or 3.12, clone/extract the code,
-change into its repository root, install as above and upload private files under `local/`.
-A GPU is unnecessary for this regression workflow. Download `index.html` to view results.
+Serverless supports the signed `run_project` action in examples/project-job.json. Put filenames under the persistent `OPTION_C_STORE_ROOT/<site_id>/inputs/` directory. The config site ID must match the signed payload. Only simple site-scoped filenames are accepted; no arbitrary shell commands, paths or downloads. Output is stored under `<site_id>/project-results/<request_id>/`. Results are private mounted artifacts; no public URLs are generated.
 
-The Dockerfile starts the separate signed-job serverless handler, not the Pod test.
-It installs the optional Runpod/Excel dependencies, runs as UID 10001, and requires:
+Set `OPTION_C_JOB_HMAC_KEY` (at least 32 characters) and persistent `OPTION_C_STORE_ROOT`; sign envelopes with examples/sign_job.py in a trusted backend. Keep secrets and signed jobs private. Service assumptions remain single-worker/shared-secret; a repeated request ID with changed content is rejected. Use a new request ID after an interrupted partial project run.
 
-- `OPTION_C_JOB_HMAC_KEY`: a private HMAC key of at least 32 characters.
-- `OPTION_C_STORE_ROOT`: a persistent directory writable by UID 10001.
+## Implementation map
 
-`examples/sign_job.py` signs jobs in a trusted backend. Never commit keys, signed site
-jobs, session captures or credentials. The handler supports site-scoped train, forecast,
-savings and post-model jobs with bounded inline payloads; large archives belong in
-the Pod file workflow. Signed-job tests are offline. A live Docker/serverless deployment
-has not been verified by this release; provision storage/permissions and test it before use.
-
-## Verification and known limits
-
-Version 0.6.0 adds explicit setpoint-response consumption, richer annual calendar
-candidates and centered uncertainty resampling to the robust baseline workflow.
-Version 0.5.0 added common chronological validation,
-reviewable meter-quality screening and withheld headlines for unreliable results.
-All 85 offline tests passed locally, including the earlier 78 checks and explicit
-setpoint-response tests. Tests cover raw-value preservation, anchored decisions and selection
-without holdout leakage, missing-day handling and end-to-end exports. A local Python
-wheel is built for release. Docker and live Runpod infrastructure require site testing.
-The legacy BMS response still needs sufficient synchronized, coverage-screened days.
-The separate small setpoint model has its own parameter-count and holdout checks;
-missing inputs and unverified point/boundary semantics remain explicit limitations.
-
-Annual calendar terms approximate recurring seasonal patterns but do not model actual
-weather or changes in heating/cooling demand; a three-month
-winter forecast can be unreliable even when a numerical validation screen passes.
-
-GitHub Actions runs the offline tests on Python 3.11 and 3.12 after push. No private
-inputs, real CARMA access or BACnet writes are used by CI. Local checks and CI do not
-certify an M&V plan or validate live Runpod infrastructure.
+- date_history.py: sparse observations, fixed cohort, observed intervals and daily eligibility.
+- strict_history.py: simulated complete trajectory aggregation and legacy row helper.
+- power_model.py: weather-aware meter and pooled BMS/electrical regressions.
+- thermal_model.py: weather-forced thermal identification and free-running validation.
+- policy_forecast.py: schedules, common initial conditions, policy rollouts and comparisons.
+- weather_scenario.py: explicit historical climatology scenario.
+- project_cli.py / scripts/run_project.py: full orchestration and report.
+- project_job.py / service.py: signed Runpod project jobs.
+- utility.py / ingestion.py / weather.py: Alectra/CARMA input handling and external-weather validation.
+- resilient.py / workflow.py / overview.py: historical baseline, avoided-energy comparison and legacy report.
